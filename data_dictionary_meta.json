@@ -1,0 +1,236 @@
+{
+  "stage_1_data_dictionary": {
+    "order_id": {
+      "column_name": "order_id",
+      "data_type": "string",
+      "description": "Unique identifier for each order transaction, following the pattern ORD-XXXX.",
+      "example_values": [
+        "ORD-1025",
+        "ORD-1014",
+        "ORD-1009"
+      ],
+      "nullable": false,
+      "unique": true,
+      "notes": "Intended primary key; a confirmed duplicate exists (ORD-1002 appears twice with identical data), which is a data quality issue. Must always be populated. Pattern constraint: ORD-[0-9]{4}."
+    },
+    "customer_id": {
+      "column_name": "customer_id",
+      "data_type": "string",
+      "description": "Unique identifier for the customer who placed the order, following the pattern CUST-XXX.",
+      "example_values": [
+        "CUST-008",
+        "CUST-011",
+        "CUST-007"
+      ],
+      "nullable": true,
+      "unique": false,
+      "notes": "Contains 1 null value (ORD-1032 is the confirmed missing case). Pattern constraint: CUST-[0-9]{3}. A single customer may appear across multiple orders. Classified as PII."
+    },
+    "customer_email": {
+      "column_name": "customer_email",
+      "data_type": "email",
+      "description": "Email address of the customer associated with the order, used for communication and identification.",
+      "example_values": [
+        "henry@example.com",
+        "karl@example.com",
+        "grace@example.com"
+      ],
+      "nullable": true,
+      "unique": false,
+      "notes": "Contains 2 null values. Should conform to standard email format (local@domain.tld). Classified as PII; subject to potential GDPR compliance requirements. A single email may appear across multiple orders."
+    },
+    "order_date": {
+      "column_name": "order_date",
+      "data_type": "date",
+      "description": "The date on which the order was placed, formatted as YYYY-MM-DD.",
+      "example_values": [
+        "2024-01-25",
+        "2024-01-15",
+        "2024-01-10"
+      ],
+      "nullable": false,
+      "unique": false,
+      "notes": "Must always be populated. Format: YYYY-MM-DD. Observed date range spans 2024-01-03 to 2024-02-10. order_date must not be later than ship_date; ORD-1037 is a confirmed anomaly where ship_date (2024-01-08) precedes order_date (2024-02-07)."
+    },
+    "ship_date": {
+      "column_name": "ship_date",
+      "data_type": "date",
+      "description": "The date on which the order was shipped, formatted as YYYY-MM-DD.",
+      "example_values": [
+        "2024-01-18",
+        "2024-01-12",
+        "2024-01-29"
+      ],
+      "nullable": true,
+      "unique": false,
+      "notes": "Contains 6 null values. Null is expected and valid when order status is 'processing', 'cancelled', or 'refunded'. Must be populated when status is 'delivered' or 'shipped'. ship_date must be greater than or equal to order_date; ORD-1037 violates this rule and is flagged as an anomaly. Format: YYYY-MM-DD."
+    },
+    "product_sku": {
+      "column_name": "product_sku",
+      "data_type": "string",
+      "description": "Stock-keeping unit identifier for the product included in the order, following the pattern SKU-[A-Z][0-9]+.",
+      "example_values": [
+        "SKU-S1900",
+        "SKU-J1000",
+        "SKU-G700"
+      ],
+      "nullable": false,
+      "unique": false,
+      "notes": "Must always be populated. Pattern constraint: SKU-[A-Z][0-9]+. A single SKU may appear across multiple orders. Should reference a valid product in the product catalog."
+    },
+    "product_name": {
+      "column_name": "product_name",
+      "data_type": "string",
+      "description": "Human-readable name of the product purchased in the order.",
+      "example_values": [
+        "Privacy Screen Filter",
+        "4K Webcam",
+        "Laptop Stand"
+      ],
+      "nullable": false,
+      "unique": false,
+      "notes": "Must always be populated. Should be consistent with the associated product_sku; mismatches between product_name and product_sku may indicate a data integrity issue."
+    },
+    "category": {
+      "column_name": "category",
+      "data_type": "string",
+      "description": "Product category grouping to which the ordered item belongs.",
+      "example_values": [
+        "Accessories",
+        "Electronics",
+        "Furniture"
+      ],
+      "nullable": false,
+      "unique": false,
+      "notes": "Must always be populated. Observed values are limited to {Electronics, Accessories, Furniture}; new categories may be added as the business grows. Should be validated against an allowed-values list."
+    },
+    "quantity": {
+      "column_name": "quantity",
+      "data_type": "integer",
+      "description": "Number of units of the product included in the order.",
+      "example_values": [
+        2,
+        1,
+        3
+      ],
+      "nullable": false,
+      "unique": false,
+      "notes": "Must always be populated. Observed range: -1 to 10. Negative values (e.g., -1 for ORD-1012) are valid only for refunded orders and must not appear for any other status. Zero quantity should be considered invalid."
+    },
+    "unit_price": {
+      "column_name": "unit_price",
+      "data_type": "float",
+      "description": "Price per single unit of the product before discounts or taxes are applied, in USD.",
+      "example_values": [
+        39.99,
+        149.0,
+        49.99
+      ],
+      "nullable": false,
+      "unique": false,
+      "notes": "Must always be populated. Observed range: $9.99 to $749.00. Must be a positive value. Used in conjunction with quantity, discount_pct, and tax_rate to derive total_amount."
+    },
+    "discount_pct": {
+      "column_name": "discount_pct",
+      "data_type": "integer",
+      "description": "Percentage discount applied to the order, expressed as a whole number (e.g., 10 represents 10%).",
+      "example_values": [
+        0,
+        10,
+        5
+      ],
+      "nullable": false,
+      "unique": false,
+      "notes": "Must always be populated. Observed values: {0, 5, 10, 15, 20, 25}. Must be between 0 and 100 inclusive. A value of 0 indicates no discount was applied."
+    },
+    "tax_rate": {
+      "column_name": "tax_rate",
+      "data_type": "float",
+      "description": "Tax rate applied to the order, expressed as a decimal proportion (e.g., 0.08 represents 8%).",
+      "example_values": [
+        0.08,
+        0.25
+      ],
+      "nullable": false,
+      "unique": false,
+      "notes": "Must always be populated. Observed values: {0.08, 0.25}. The standard expected rate appears to be 0.08; a rate of 0.25 on ORD-1013 is a confirmed anomaly and should not be tolerated. Must be a positive value between 0 and 1."
+    },
+    "total_amount": {
+      "column_name": "total_amount",
+      "data_type": "float",
+      "description": "Final monetary value of the order in USD after applying quantity, discounts, and taxes.",
+      "example_values": [
+        86.38,
+        290.93,
+        107.98
+      ],
+      "nullable": false,
+      "unique": false,
+      "notes": "Must always be populated. Observed range: -$86.39 to $808.92. Negative values are valid only for refunded orders. Should be derivable as: (quantity * unit_price) * (1 - discount_pct/100) * (1 + tax_rate); deviations may indicate calculation errors. Critical column for financial reporting."
+    },
+    "payment_method": {
+      "column_name": "payment_method",
+      "data_type": "string",
+      "description": "The method used by the customer to pay for the order.",
+      "example_values": [
+        "credit_card",
+        "paypal",
+        "debit_card"
+      ],
+      "nullable": false,
+      "unique": false,
+      "notes": "Must always be populated. Observed values: {credit_card, debit_card, paypal}. New payment methods may be added over time. Classified as sensitive data; potential PCI-DSS compliance applicability."
+    },
+    "status": {
+      "column_name": "status",
+      "data_type": "string",
+      "description": "Current fulfillment status of the order in its lifecycle.",
+      "example_values": [
+        "processing",
+        "delivered",
+        "shipped"
+      ],
+      "nullable": false,
+      "unique": false,
+      "notes": "Must always be populated. Observed values: {processing, shipped, delivered, cancelled, refunded}. Drives conditional rules: ship_date must be null for processing/cancelled/refunded; ship_date must be populated for shipped/delivered; quantity may be negative only for refunded orders."
+    },
+    "region": {
+      "column_name": "region",
+      "data_type": "string",
+      "description": "Geographic sales region within the US associated with the order.",
+      "example_values": [
+        "US-SOUTH",
+        "US-CENTRAL",
+        "US-EAST"
+      ],
+      "nullable": true,
+      "unique": false,
+      "notes": "Contains 1 null value (confirmed on ORD-1008). Observed values: {US-EAST, US-WEST, US-SOUTH, US-CENTRAL}. Should be populated for all non-cancelled orders. New regions may be added as the business expands."
+    },
+    "warehouse_id": {
+      "column_name": "warehouse_id",
+      "data_type": "string",
+      "description": "Identifier for the warehouse responsible for fulfilling the order, following the pattern WH-XX.",
+      "example_values": [
+        "WH-04",
+        "WH-03",
+        "WH-01"
+      ],
+      "nullable": false,
+      "unique": false,
+      "notes": "Must always be populated. Observed values: {WH-01, WH-02, WH-03, WH-04, WH-99}. WH-99 on ORD-1037 is a confirmed anomaly and does not correspond to a known warehouse; should be validated against a reference list of valid warehouse IDs."
+    },
+    "is_flagged": {
+      "column_name": "is_flagged",
+      "data_type": "boolean",
+      "description": "Indicator of whether the order has been flagged for review due to a detected anomaly or data quality issue.",
+      "example_values": [
+        false,
+        true
+      ],
+      "nullable": false,
+      "unique": false,
+      "notes": "Must always be populated. True indicates the order has been flagged; confirmed flagged orders include ORD-1012, ORD-1013, and ORD-1037. Flagging logic is incomplete: known issues such as the duplicate ORD-1002 and missing customer emails are not captured by this flag and should not be solely relied upon for governance."
+    }
+  }
+}

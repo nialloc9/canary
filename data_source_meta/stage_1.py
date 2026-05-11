@@ -1,28 +1,24 @@
-"""
-Stage 7 - Anything Else
-Captures additional information not covered by previous stages using Claude QA Agent.
+"""Stage 1 - Data Identity
+Analyzes dataset identity, purpose, frequency, and origin using Claude QA Agent.
 """
 import json
 from agents.qa_agent.qa_agent import QAAgent
-from ingestion.dependencies import Dependencies
+from data_source_meta.dependencies import Dependencies
 
-
-class Stage7AnythingElse(Dependencies):
+class Stage1DataIdentity(Dependencies):
     """
-    Stage 7 analyzer for capturing additional insights and information.
+    Stage 1 analyzer for dataset identity information.
     
-    Asks open-ended questions about:
-    - Data quality issues and history
-    - Integration and dependencies
-    - Retention and compliance
-    - Anything else relevant to data governance
+    Asks questions about:
+    - Dataset purpose and description
+    - Data arrival frequency
+    - Data source and origin
     """
     
-    STAGE_7_QUESTIONS = [
-        "What are known data quality issues or historical problems with this dataset?",
-        "What downstream systems or processes depend on this data?",
-        "Are there any regulatory or compliance requirements (GDPR, HIPAA, etc.) for this data?",
-        "Is there anything else about this dataset that we should know for proper monitoring and governance?",
+    QUESTIONS = [
+        "What does this dataset represent? Describe its purpose in one or two sentences.",
+        "How often does this data arrive? (real-time, hourly, daily, ad hoc)",
+        "What is the source system or origin of this data?",
     ]
 
     qa_agent = QAAgent()
@@ -30,11 +26,11 @@ class Stage7AnythingElse(Dependencies):
     
     def __init__(self, data_file_path: str, previous_results: dict = None):
         """
-        Initialize Stage 7 analyzer.
+        Initialize Stage 1 analyzer.
         
         Args:
             data_file_path: Path to the CSV data file to analyze.
-            previous_results: Results from stages 1-6 for context.
+            previous_results: Results from previous stages for context.
         """
         self.data_file_path = data_file_path
         self.previous_results = previous_results or {}
@@ -42,7 +38,7 @@ class Stage7AnythingElse(Dependencies):
     
     def analyze(self, use_batch: bool = True) -> list[dict]:
         """
-        Perform Stage 7 analysis on the dataset.
+        Perform Stage 1 analysis on the dataset.
         
         Args:
             use_batch: If True, uses batch processing (more efficient).
@@ -52,7 +48,7 @@ class Stage7AnythingElse(Dependencies):
             List of dictionaries with 'question' and 'answer' keys.
         """
         self.logger.info("="*70)
-        self.logger.info("STAGE 7 - ANYTHING ELSE ANALYSIS")
+        self.logger.info("STAGE 1 - DATA IDENTITY ANALYSIS")
         self.logger.info("="*70)
         
         # Load the data
@@ -62,13 +58,13 @@ class Stage7AnythingElse(Dependencies):
         context = self._build_context_string()
         
         # Ask questions
-        self.logger.info("Analyzing anything else relevant to this dataset...")
+        self.logger.info("Analyzing dataset identity...")
         self.logger.info("-" * 70)
         
         if use_batch:
-            self.results = self.qa_agent.answer_questions_batch(self.STAGE_7_QUESTIONS, additional_context=context)
+            self.results = self.qa_agent.answer_questions_batch(self.QUESTIONS, additional_context=context)
         else:
-            self.results = self.qa_agent.answer_questions(self.STAGE_7_QUESTIONS, additional_context=context)
+            self.results = self.qa_agent.answer_questions(self.QUESTIONS, additional_context=context)
         
         return self.results
     
@@ -103,14 +99,13 @@ class Stage7AnythingElse(Dependencies):
         Get results as a structured dictionary.
         
         Returns:
-            Dictionary with keys: data_quality_history, downstream_dependencies, compliance_requirements, additional_insights
+            Dictionary with keys: dataset_purpose, data_frequency, data_source
         """
         if self.results is None:
             raise ValueError("No results available. Run analyze() first.")
         
         return {
-            "data_quality_history": self.results[0]["answer"],
-            "downstream_dependencies": self.results[1]["answer"],
-            "compliance_requirements": self.results[2]["answer"],
-            "additional_insights": self.results[3]["answer"],
+            "dataset_purpose": self.results[0]["answer"],
+            "data_frequency": self.results[1]["answer"],
+            "data_source": self.results[2]["answer"],
         }

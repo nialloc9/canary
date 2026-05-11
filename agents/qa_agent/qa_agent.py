@@ -43,15 +43,14 @@ class QAAgent(Dependencies):
             self.logger.error(f"File not found: {file_path}")
             raise FileNotFoundError(f"File not found: {file_path}")
         
-        if file_path.suffix.lower() == '.csv':
-            self.logger.debug(f"Reading CSV file: {file_path}")
-            self.data_context = pd.read_csv(file_path)
-        else:
+        if file_path.suffix.lower() != '.csv':
             self.logger.error(f"Unsupported file type: {file_path.suffix}")
             raise ValueError(f"Unsupported file type: {file_path.suffix}")
-        
+
+        df = pd.read_csv(file_path)
+        self.data_context = df.sample(n=min(100, len(df)), random_state=42)
         self.logger.info(f"✓ Loaded data from {file_path}")
-        self.logger.info(f"  Rows: {len(self.data_context)}")
+        self.logger.info(f"  Rows: {len(self.data_context)}/{len(df)}")
         self.logger.info(f"  Columns: {list(self.data_context.columns)}")
     
     def answer_questions(self, questions: list[str], additional_context: Optional[str] = None) -> list[dict]:
@@ -61,32 +60,21 @@ class QAAgent(Dependencies):
         Args:
             questions: List of questions to answer.
             additional_context: Optional additional context to include in the prompt.
-        self.logger.debug(f"answer_questions called with {len(questions)} question(s)")
-        
+            
+        Returns:
+            List of dictionaries with 'question' and 'answer' keys.
+        """
         if self.data_context is None:
-            self.logger.error("No data loaded. Call load_data() first.")
             raise ValueError("No data loaded. Call load_data() first.")
         
         # Convert data to string format for context
         data_string = self.data_context.to_string()
-        self.logger.debug(f"Data context prepared ({len(data_string)} characters)")
         
         results = []
         
-        for i, question in enumerate(questions, 1):
-            self.logger.debug(f"Processing question {i}/{len(questions)}: {question}")
-            try:
-                answer = self._get_answer(question, data_string, additional_context)
-                results.append({
-                    "question": question,
-                    "answer": answer
-                })
-                self.logger.debug(f"Question {i} answered successfully")
-            except Exception as e:
-                self.logger.error(f"Error answering question {i}: {str(e)}")
-                raise
-        
-        self.logger.info(f"Successfully answered {len(results)} question(s)")    results.append({
+        for question in questions:
+            answer = self._get_answer(question, data_string, additional_context)
+            results.append({
                 "question": question,
                 "answer": answer
             })
@@ -94,39 +82,30 @@ class QAAgent(Dependencies):
         return results
     
     def _get_answer(self, question: str, data_string: str, additional_context: Optional[str] = None) -> str:
-        self.logger.debug(f"_get_answer called for: {question[:50]}...")
+        """
+        Get an answer to a single question from the QA Agent.
         
+        Args:
+            question: The question to answer.
+            data_string: The data context as a string.
+            additional_context: Optional additional context to include in the prompt.
+            
+        Returns:
+            The answer from the QA Agent.
+        """
         # Build the prompt with optional additional context
-        prompt = f"""You are a data analysis assistant. Based on the following data, answer the question concisely and accurately.
+        prompt = f"""You are a data analysis assistant. Answer questions about the data below.
+Keep answers short (1-2 sentences maximum). No preamble, no explanation — facts only.
 
 Data:
 {data_string}"""
-        
+
         if additional_context:
             prompt += f"\n\nAdditional Context:\n{additional_context}"
-            self.logger.debug("Additional context included in prompt")
+
+        prompt += f"\n\nQuestion: {question}\n\nAnswer (1-2 sentences, facts only):"
         
-        prompt += f"\n\nQuestion: {question}\n\nProvide a clear, direct answer based on the data and context provided."
-        
-        try:
-            self.logger.debug(f"Making API call to {self.model} with max_tokens=1024")
-            message = self.client.messages.create(
-                model=self.model,
-                max_tokens=1024,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ]
-            )
-            
-            answer = message.content[0].text
-            self.logger.debug(f"Received answer from API ({len(answer)} characters)")
-            return answer
-        except Exception as e:
-            self.logger.error(f"API call failed: {str(e)}")
-            raise.create(
+        message = self.client.messages.create(
             model=self.model,
             max_tokens=1024,
             messages=[
@@ -140,75 +119,60 @@ Data:
         return message.content[0].text
     
     def answer_questions_batch(self, questions: list[str], additional_context: Optional[str] = None) -> list[dict]:
-        self.logger.debug(f"answer_questions_batch called with {len(questions)} question(s)")
+        """
+        Answer multiple questions in a single API call for efficiency.
         
+        Args:
+            questions: List of questions to answer.
+            additional_context: Optional additional context to include in the prompt.
+            
+        Returns:
+            List of dictionaries with 'question' and 'answer' keys.
+        """
         if self.data_context is None:
-            self.logger.error("No data loaded. Call load_data() first.")
             raise ValueError("No data loaded. Call load_data() first.")
         
         data_string = self.data_context.to_string()
-        self.logger.debug(f"Data context prepared ({len(data_string)} characters)")
         
         # Format questions for the prompt
         questions_text = "\n".join([f"{i+1}. {q}" for i, q in enumerate(questions)])
         
         # Build the prompt with optional additional context
-        prompt = f"""You are a data analysis assistant. Based on the following data, answer each question concisely and accurately.
+        prompt = f"""You are a data analysis assistant. Answer questions about the data below.
+Keep each answer short (1-2 sentences maximum). No preamble, no explanation — facts only.
 
 Data:
 {data_string}"""
-        
+
         if additional_context:
             prompt += f"\n\nAdditional Context:\n{additional_context}"
-            self.logger.debug("Additional context included in prompt")
-        
+
         prompt += f"""\n\nQuestions:
 {questions_text}
 
-Provide answers as a JSON array of objects with "question" and "answer" keys. Example format:
+Return ONLY a JSON array. Each element must have "question" and "answer" keys. Answers must be 1-2 sentences, facts only.
 [
   {{"question": "Question 1?", "answer": "Answer 1"}},
   {{"question": "Question 2?", "answer": "Answer 2"}}
-]
-
-Return ONLY the JSON array, no additional text."""
+]"""
         
+        message = self.client.messages.create(
+            model=self.model,
+            max_tokens=2048,
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ]
+        )
+        
+        response_text = message.content[0].text
+        
+        # Parse the JSON response
         try:
-            self.logger.debug(f"Making batch API call to {self.model} with max_tokens=2048")
-            message = self.client.messages.create(
-                model=self.model,
-                max_tokens=2048,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ]
-            )
-            
-            response_text = message.content[0].text
-            self.logger.debug(f"Received batch response from API ({len(response_text)} characters)")
-            
-            # Parse the JSON response
-            try:
-                # Handle potential markdown code blocks
-                if "```json" in response_text:
-                    response_text = response_text.split("```json")[1].split("```")[0].strip()
-                    self.logger.debug("Extracted JSON from markdown code block")
-                elif "```" in response_text:
-                    response_text = response_text.split("```")[1].split("```")[0].strip()
-                    self.logger.debug("Extracted JSON from code block")
-                
-                results = json.loads(response_text)
-                self.logger.info(f"Successfully parsed batch response with {len(results)} answers")
-                return results
-            except json.JSONDecodeError as e:
-                # Fallback to individual question answering if batch fails
-                self.logger.warning(f"Could not parse batch response: {str(e)}. Falling back to individual questions.")
-                return self.answer_questions(questions, additional_context)
-        except Exception as e:
-            self.logger.error(f"Batch API call failed: {str(e)}")
-            raise
+            # Handle potential markdown code blocks
+            if "```json" in response_text:
                 response_text = response_text.split("```json")[1].split("```")[0].strip()
             elif "```" in response_text:
                 response_text = response_text.split("```")[1].split("```")[0].strip()

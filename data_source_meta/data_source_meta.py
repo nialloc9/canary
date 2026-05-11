@@ -1,15 +1,15 @@
-from ingestion.stage_1 import Stage1DataIdentity
-from ingestion.stage_2 import Stage2SchemaStructure
-from ingestion.stage_3 import Stage3VolumeCompleteness
-from ingestion.stage_4 import Stage4ValueRules
-from ingestion.stage_5 import Stage5UniquenessRelationships
-from ingestion.stage_6 import Stage6SeverityBusinessLogic
-from ingestion.stage_7 import Stage7AnythingElse
-from ingestion.dependencies import Dependencies
+from data_source_meta.stage_1 import Stage1DataIdentity
+from data_source_meta.stage_2 import Stage2SchemaStructure
+from data_source_meta.stage_3 import Stage3VolumeCompleteness
+from data_source_meta.stage_4 import Stage4ValueRules
+from data_source_meta.stage_5 import Stage5UniquenessRelationships
+from data_source_meta.stage_6 import Stage6SeverityBusinessLogic
+from data_source_meta.stage_7 import Stage7AnythingElse
+from data_source_meta.dependencies import Dependencies
 import json
 
 
-class Ingestion(Dependencies):
+class DataSourceMeta(Dependencies):
     """Main application class to run all stages of data analysis."""
     
     def __init__(self, data_file_path: str):
@@ -134,7 +134,7 @@ class Ingestion(Dependencies):
         """
         return self.combined_results
     
-    def save_combined_results(self, output_file: str = "analysis_results.json") -> None:
+    def save_combined_results(self, output_file: str = "data_source_meta.json") -> None:
         """
         Save combined results from all stages to a JSON file.
         

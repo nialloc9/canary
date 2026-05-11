@@ -1,23 +1,28 @@
-"""Stage 3 - Volume and Completeness
-Analyzes the volume and completeness of the dataset using Claude QA Agent.
+"""
+Stage 4 - Value Rules
+Analyzes dataset value constraints and validation rules using Claude QA Agent.
 """
 import json
 from agents.qa_agent.qa_agent import QAAgent
-from ingestion.dependencies import Dependencies
+from data_source_meta.dependencies import Dependencies
 
 
-class Stage3VolumeCompleteness(Dependencies):
+class Stage4ValueRules(Dependencies):
     """
-    Stage 3 analyzer for dataset volume and completeness information.
+    Stage 4 analyzer for dataset value rules and constraints.
     
     Asks questions about:
-    - Expected row volume and ranges
-    - Busy/quiet periods and volume variations
+    - Numeric column ranges and validity
+    - Categorical column values
+    - Date/time format and constraints
+    - Format and pattern constraints
     """
     
-    STAGE_3_QUESTIONS = [
-        "Roughly how many rows do you expect per batch or per day? Is there a min/max range?",
-        "Are there known busy periods or quiet periods that would naturally change row volume?",
+    STAGE_4_QUESTIONS = [
+        "For numeric columns: what is the valid min/max range? Are negative values ever valid?",
+        "For categorical columns: what is the fixed set of allowed values? Can new values legitimately appear over time?",
+        "For date/time columns: what format do you expect? Should dates always be recent, or can they be historical?",
+        "Are there format or pattern constraints on any field? (email, phone, country code, regex pattern)",
     ]
 
     qa_agent = QAAgent()
@@ -25,7 +30,7 @@ class Stage3VolumeCompleteness(Dependencies):
     
     def __init__(self, data_file_path: str, previous_results: dict = None):
         """
-        Initialize Stage 3 analyzer.
+        Initialize Stage 4 analyzer.
         
         Args:
             data_file_path: Path to the CSV data file to analyze.
@@ -37,7 +42,7 @@ class Stage3VolumeCompleteness(Dependencies):
     
     def analyze(self, use_batch: bool = True) -> list[dict]:
         """
-        Perform Stage 3 analysis on the dataset.
+        Perform Stage 4 analysis on the dataset.
         
         Args:
             use_batch: If True, uses batch processing (more efficient).
@@ -47,7 +52,7 @@ class Stage3VolumeCompleteness(Dependencies):
             List of dictionaries with 'question' and 'answer' keys.
         """
         self.logger.info("="*70)
-        self.logger.info("STAGE 3 - VOLUME & COMPLETENESS ANALYSIS")
+        self.logger.info("STAGE 4 - VALUE RULES ANALYSIS")
         self.logger.info("="*70)
         
         # Load the data
@@ -57,13 +62,13 @@ class Stage3VolumeCompleteness(Dependencies):
         context = self._build_context_string()
         
         # Ask questions
-        self.logger.info("Analyzing dataset volume and completeness...")
+        self.logger.info("Analyzing dataset value rules and constraints...")
         self.logger.info("-" * 70)
         
         if use_batch:
-            self.results = self.qa_agent.answer_questions_batch(self.STAGE_3_QUESTIONS, additional_context=context)
+            self.results = self.qa_agent.answer_questions_batch(self.STAGE_4_QUESTIONS, additional_context=context)
         else:
-            self.results = self.qa_agent.answer_questions(self.STAGE_3_QUESTIONS, additional_context=context)
+            self.results = self.qa_agent.answer_questions(self.STAGE_4_QUESTIONS, additional_context=context)
         
         return self.results
     
@@ -98,12 +103,14 @@ class Stage3VolumeCompleteness(Dependencies):
         Get results as a structured dictionary.
         
         Returns:
-            Dictionary with keys: row_volume, volume_variations
+            Dictionary with keys: numeric_ranges, categorical_values, datetime_format, pattern_constraints
         """
         if self.results is None:
             raise ValueError("No results available. Run analyze() first.")
         
         return {
-            "row_volume": self.results[0]["answer"],
-            "volume_variations": self.results[1]["answer"],
+            "numeric_ranges": self.results[0]["answer"],
+            "categorical_values": self.results[1]["answer"],
+            "datetime_format": self.results[2]["answer"],
+            "pattern_constraints": self.results[3]["answer"],
         }

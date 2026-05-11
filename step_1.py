@@ -5,7 +5,7 @@ Runs comprehensive 7-stage data analysis using Claude AI.
 
 import sys
 from pathlib import Path
-from ingestion.ingestion import Ingestion
+from data_source_meta.data_source_meta import DataSourceMeta
 
 
 def main():
@@ -35,7 +35,7 @@ def main():
             
             # Run the analysis
             print(f"\n✓ Starting analysis on '{file_path_input}'...")
-            app = Ingestion(str(file_path))
+            app = DataSourceMeta(str(file_path))
             app.run_all_stages()
             
             # Display results

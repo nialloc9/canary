@@ -1,0 +1,38 @@
+{
+  "stage_1_data_identity": {
+    "dataset_purpose": "This dataset represents e-commerce order transaction records, capturing details such as customer info, products purchased, pricing, discounts, taxes, shipping, and order status. Its purpose is to track and analyze sales activity across regions and warehouses.",
+    "data_frequency": "Cannot be determined from the data itself; order dates span January\u2013February 2024, suggesting it may be a periodic or ad hoc extract rather than real-time or hourly feed.",
+    "data_source": "The source system cannot be definitively identified from the data alone, but the structure strongly suggests it originates from an order management system (OMS) or e-commerce platform database."
+  },
+  "stage_2_schema_structure": {
+    "column_flexibility": "The 18 columns appear fixed based on the current schema; optional (nullable) columns observed include ship_date, customer_email, customer_id, and region, which contain NaN values in the data.",
+    "data_types": "order_id: string, customer_id: string, customer_email: string, order_date: date, ship_date: date, product_sku: string, product_name: string, category: string, quantity: integer, unit_price: float, discount_pct: float, tax_rate: float, total_amount: float, payment_method: string, status: string, region: string, warehouse_id: string, is_flagged: boolean.",
+    "null_constraints": "Columns that must always have a value include order_id, order_date, product_sku, product_name, category, quantity, unit_price, discount_pct, tax_rate, total_amount, payment_method, status, warehouse_id, and is_flagged; ship_date, customer_id, customer_email, and region are allowed to be null.",
+    "data_classification": "This dataset is confidential/PII, as it contains personally identifiable information including customer email addresses, customer IDs, and payment method details."
+  },
+  "stage_3_volume_completeness": {
+    "row_volume": "The dataset contains 41 rows spanning ~39 days (Jan 3 \u2013 Feb 10, 2024), suggesting roughly 1\u20133 orders per day on average; no strict min/max can be confirmed from this sample alone.",
+    "volume_variations": "The data shows slightly higher order density in mid-to-late January 2024, but the sample is too small to confirm reliable seasonal or cyclical busy/quiet patterns."
+  },
+  "stage_4_value_rules": {
+    "numeric_ranges": "quantity ranges from -1 to 10 (negative observed only for refunded orders, ORD-1012), unit_price from ~$9.99 to $749.00, discount_pct from 0 to 25, tax_rate from 0.08 to 0.25, and total_amount from -$86.39 to $808.92; negative values appear valid only in refund scenarios.",
+    "categorical_values": "Observed values \u2014 status: {delivered, shipped, processing, cancelled, refunded}; category: {Electronics, Accessories, Furniture}; payment_method: {credit_card, debit_card, paypal}; region: {US-EAST, US-WEST, US-SOUTH, US-CENTRAL}; new values may legitimately appear over time as the business grows.",
+    "datetime_format": "Both order_date and ship_date follow YYYY-MM-DD format; ship_date can be null for processing/cancelled/refunded orders, and one anomaly exists where ship_date (2024-01-08) precedes order_date (2024-02-07) in ORD-1037, suggesting dates should generally be recent but historical records may exist.",
+    "pattern_constraints": "customer_email should follow standard email format (local@domain.tld) and two null values exist; order_id follows pattern ORD-XXXX, customer_id follows CUST-XXX, product_sku follows SKU-[A-Z][0-9]+, and warehouse_id follows WH-XX (with WH-99 flagged as anomalous)."
+  },
+  "stage_5_uniqueness_relationships": {
+    "primary_keys": "order_id is the intended unique identifier, but a confirmed duplicate exists (ORD-1002 appears twice with identical data), so duplicates should not appear and indicate a data quality issue.",
+    "conditional_relationships": "Yes: ship_date should be populated when status is 'delivered' or 'shipped' and must be null for 'processing', 'cancelled', or 'refunded' orders; quantity should be negative only when status is 'refunded'; and region should always be populated for non-cancelled orders."
+  },
+  "stage_6_severity_business_logic": {
+    "critical_columns": "The most critical columns are order_id, total_amount, quantity, unit_price, discount_pct, and status, as errors in these directly impact revenue accuracy, order fulfillment, and financial reporting. customer_email and payment_method are also high priority due to PII and payment integrity concerns.",
+    "known_quirks": "Negative quantity (-1) is valid for refunded orders (e.g., ORD-1012), and null ship_date is expected for orders with status 'processing', 'cancelled', or 'refunded'; these should not trigger anomaly alerts. The elevated tax_rate of 0.25 on ORD-1013 and the backdated ship_date on ORD-1037 are confirmed anomalies and should not be tolerated.",
+    "notification_procedure": "Cannot be determined from the data alone, as escalation paths, team ownership, and SLA expectations are not encoded in the dataset. Notification urgency and routing should be defined by the business based on anomaly type (e.g., financial vs. fulfillment vs. PII)."
+  },
+  "stage_7_anything_else": {
+    "data_quality_history": "Confirmed issues include: duplicate order ORD-1002, negative quantity on ORD-1012 (refund), anomalous tax rate (0.25) on ORD-1013, ship_date preceding order_date on ORD-1037, invalid warehouse WH-99 on ORD-1037, missing customer_id on ORD-1032, missing region on ORD-1008, and two null customer emails.",
+    "downstream_dependencies": "Cannot be determined from the data alone; however, the presence of payment, fulfillment, and shipping fields strongly implies downstream dependencies on financial reporting, warehouse/inventory systems, and shipping/logistics platforms.",
+    "compliance_requirements": "Cannot be confirmed from the data alone, but the presence of customer PII (emails, IDs, payment methods) suggests potential GDPR and PCI-DSS applicability depending on the operating jurisdiction and payment processing scope.",
+    "additional_insights": "The is_flagged column already identifies some anomalies (ORD-1012, ORD-1013, ORD-1037) but does not capture all issues found (e.g., duplicate ORD-1002, missing emails), indicating the flagging logic is incomplete and should not be solely relied upon for governance."
+  }
+}

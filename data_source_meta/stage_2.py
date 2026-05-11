@@ -1,24 +1,28 @@
-"""Stage 1 - Data Identity
-Analyzes dataset identity, purpose, frequency, and origin using Claude QA Agent.
+"""
+Stage 2 - Schema & Structure
+Analyzes dataset schema, column structure, and data types using Claude QA Agent.
 """
 import json
 from agents.qa_agent.qa_agent import QAAgent
-from ingestion.dependencies import Dependencies
+from data_source_meta.dependencies import Dependencies
 
-class Stage1DataIdentity(Dependencies):
+
+class Stage2SchemaStructure(Dependencies):
     """
-    Stage 1 analyzer for dataset identity information.
+    Stage 2 analyzer for dataset schema and structure information.
     
     Asks questions about:
-    - Dataset purpose and description
-    - Data arrival frequency
-    - Data source and origin
+    - Column flexibility and mutability
+    - Data types for each column
+    - Null/empty value handling and constraints
+    - Data classification and sensitivity
     """
     
-    QUESTIONS = [
-        "What does this dataset represent? Describe its purpose in one or two sentences.",
-        "How often does this data arrive? (real-time, hourly, daily, ad hoc)",
-        "What is the source system or origin of this data?",
+    STAGE_2_QUESTIONS = [
+        "Are these columns fixed, or can new columns appear over time? Are any optional?",
+        "For each column, what data type do you expect? (string, integer, float, date, boolean…)",
+        "Which columns must always have a value? Which are allowed to be null or empty?",
+        "What is the data classification or sensitivity level of this dataset? (e.g., public, internal, confidential, restricted, PII)",
     ]
 
     qa_agent = QAAgent()
@@ -26,7 +30,7 @@ class Stage1DataIdentity(Dependencies):
     
     def __init__(self, data_file_path: str, previous_results: dict = None):
         """
-        Initialize Stage 1 analyzer.
+        Initialize Stage 2 analyzer.
         
         Args:
             data_file_path: Path to the CSV data file to analyze.
@@ -38,7 +42,7 @@ class Stage1DataIdentity(Dependencies):
     
     def analyze(self, use_batch: bool = True) -> list[dict]:
         """
-        Perform Stage 1 analysis on the dataset.
+        Perform Stage 2 analysis on the dataset.
         
         Args:
             use_batch: If True, uses batch processing (more efficient).
@@ -48,7 +52,7 @@ class Stage1DataIdentity(Dependencies):
             List of dictionaries with 'question' and 'answer' keys.
         """
         self.logger.info("="*70)
-        self.logger.info("STAGE 1 - DATA IDENTITY ANALYSIS")
+        self.logger.info("STAGE 2 - SCHEMA & STRUCTURE ANALYSIS")
         self.logger.info("="*70)
         
         # Load the data
@@ -58,13 +62,13 @@ class Stage1DataIdentity(Dependencies):
         context = self._build_context_string()
         
         # Ask questions
-        self.logger.info("Analyzing dataset identity...")
+        self.logger.info("Analyzing dataset schema and structure...")
         self.logger.info("-" * 70)
         
         if use_batch:
-            self.results = self.qa_agent.answer_questions_batch(self.QUESTIONS, additional_context=context)
+            self.results = self.qa_agent.answer_questions_batch(self.STAGE_2_QUESTIONS, additional_context=context)
         else:
-            self.results = self.qa_agent.answer_questions(self.QUESTIONS, additional_context=context)
+            self.results = self.qa_agent.answer_questions(self.STAGE_2_QUESTIONS, additional_context=context)
         
         return self.results
     
@@ -99,13 +103,14 @@ class Stage1DataIdentity(Dependencies):
         Get results as a structured dictionary.
         
         Returns:
-            Dictionary with keys: dataset_purpose, data_frequency, data_source
+            Dictionary with keys: column_flexibility, data_types, null_constraints, data_classification
         """
         if self.results is None:
             raise ValueError("No results available. Run analyze() first.")
         
         return {
-            "dataset_purpose": self.results[0]["answer"],
-            "data_frequency": self.results[1]["answer"],
-            "data_source": self.results[2]["answer"],
+            "column_flexibility": self.results[0]["answer"],
+            "data_types": self.results[1]["answer"],
+            "null_constraints": self.results[2]["answer"],
+            "data_classification": self.results[3]["answer"],
         }

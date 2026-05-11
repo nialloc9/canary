@@ -1,26 +1,28 @@
 """
-Stage 6 - Severity & Business Logic
-Analyzes dataset severity levels and business logic using Claude QA Agent.
+Stage 7 - Anything Else
+Captures additional information not covered by previous stages using Claude QA Agent.
 """
 import json
 from agents.qa_agent.qa_agent import QAAgent
-from ingestion.dependencies import Dependencies
+from data_source_meta.dependencies import Dependencies
 
 
-class Stage6SeverityBusinessLogic(Dependencies):
+class Stage7AnythingElse(Dependencies):
     """
-    Stage 6 analyzer for dataset severity and business logic.
+    Stage 7 analyzer for capturing additional insights and information.
     
-    Asks questions about:
-    - Critical columns and business impact
-    - Known quirks and edge cases
-    - Notification and response procedures
+    Asks open-ended questions about:
+    - Data quality issues and history
+    - Integration and dependencies
+    - Retention and compliance
+    - Anything else relevant to data governance
     """
     
-    STAGE_6_QUESTIONS = [
-        "If something looks wrong, which columns are most critical to the business? (helps prioritise alert severity)",
-        "Are there any known quirks or edge cases in the data you'd want the system to tolerate rather than flag?",
-        "What should happen when an anomaly is detected — who should be notified, and how urgently?",
+    STAGE_7_QUESTIONS = [
+        "What are known data quality issues or historical problems with this dataset?",
+        "What downstream systems or processes depend on this data?",
+        "Are there any regulatory or compliance requirements (GDPR, HIPAA, etc.) for this data?",
+        "Is there anything else about this dataset that we should know for proper monitoring and governance?",
     ]
 
     qa_agent = QAAgent()
@@ -28,11 +30,11 @@ class Stage6SeverityBusinessLogic(Dependencies):
     
     def __init__(self, data_file_path: str, previous_results: dict = None):
         """
-        Initialize Stage 6 analyzer.
+        Initialize Stage 7 analyzer.
         
         Args:
             data_file_path: Path to the CSV data file to analyze.
-            previous_results: Results from previous stages for context.
+            previous_results: Results from stages 1-6 for context.
         """
         self.data_file_path = data_file_path
         self.previous_results = previous_results or {}
@@ -40,7 +42,7 @@ class Stage6SeverityBusinessLogic(Dependencies):
     
     def analyze(self, use_batch: bool = True) -> list[dict]:
         """
-        Perform Stage 6 analysis on the dataset.
+        Perform Stage 7 analysis on the dataset.
         
         Args:
             use_batch: If True, uses batch processing (more efficient).
@@ -50,7 +52,7 @@ class Stage6SeverityBusinessLogic(Dependencies):
             List of dictionaries with 'question' and 'answer' keys.
         """
         self.logger.info("="*70)
-        self.logger.info("STAGE 6 - SEVERITY & BUSINESS LOGIC ANALYSIS")
+        self.logger.info("STAGE 7 - ANYTHING ELSE ANALYSIS")
         self.logger.info("="*70)
         
         # Load the data
@@ -60,13 +62,13 @@ class Stage6SeverityBusinessLogic(Dependencies):
         context = self._build_context_string()
         
         # Ask questions
-        self.logger.info("Analyzing dataset severity and business logic...")
+        self.logger.info("Analyzing anything else relevant to this dataset...")
         self.logger.info("-" * 70)
         
         if use_batch:
-            self.results = self.qa_agent.answer_questions_batch(self.STAGE_6_QUESTIONS, additional_context=context)
+            self.results = self.qa_agent.answer_questions_batch(self.STAGE_7_QUESTIONS, additional_context=context)
         else:
-            self.results = self.qa_agent.answer_questions(self.STAGE_6_QUESTIONS, additional_context=context)
+            self.results = self.qa_agent.answer_questions(self.STAGE_7_QUESTIONS, additional_context=context)
         
         return self.results
     
@@ -101,13 +103,14 @@ class Stage6SeverityBusinessLogic(Dependencies):
         Get results as a structured dictionary.
         
         Returns:
-            Dictionary with keys: critical_columns, known_quirks, notification_procedure
+            Dictionary with keys: data_quality_history, downstream_dependencies, compliance_requirements, additional_insights
         """
         if self.results is None:
             raise ValueError("No results available. Run analyze() first.")
         
         return {
-            "critical_columns": self.results[0]["answer"],
-            "known_quirks": self.results[1]["answer"],
-            "notification_procedure": self.results[2]["answer"],
+            "data_quality_history": self.results[0]["answer"],
+            "downstream_dependencies": self.results[1]["answer"],
+            "compliance_requirements": self.results[2]["answer"],
+            "additional_insights": self.results[3]["answer"],
         }

@@ -1,6 +1,7 @@
 # Env files — never commit real secrets
 .env.dev
 .env.prod
+.env.dev.local
 .env
 
 # Python

@@ -1,16 +1,7 @@
-const BASE_URL = import.meta.env.VITE_API_URL ?? '/api/v1'
+import { config } from '../config'
+import { mockApi } from '../config/mock'
 
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE_URL}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
-    ...options,
-  })
-  if (!res.ok) {
-    const error = await res.text()
-    throw new Error(error || `HTTP ${res.status}`)
-  }
-  return res.json() as Promise<T>
-}
+// ── Types ─────────────────────────────────────────────────────────────────────
 
 export interface ChatResponse {
   conversation_id: string
@@ -18,19 +9,97 @@ export interface ChatResponse {
   tool_calls: Array<{ tool: string; input: Record<string, unknown>; result: string }> | null
 }
 
+export interface TokenResponse {
+  access_token: string
+  refresh_token: string
+  token_type: string
+}
+
+export interface UserOut {
+  id: string
+  email: string
+  username: string
+  is_active: boolean
+  created_at: string
+}
+
+export interface ConversationOut {
+  id: string
+  title: string | null
+  created_at: string
+}
+
+// ── HTTP helper ───────────────────────────────────────────────────────────────
+
+function getToken(): string | null {
+  return localStorage.getItem('access_token')
+}
+
+async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const token = getToken()
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(options?.headers as Record<string, string>),
+  }
+  if (token) headers['Authorization'] = `Bearer ${token}`
+
+  const res = await fetch(`${config.apiUrl}${path}`, { ...options, headers })
+  if (!res.ok) {
+    const error = await res.text()
+    throw new Error(error || `HTTP ${res.status}`)
+  }
+  if (res.status === 204) return undefined as T
+  return res.json() as Promise<T>
+}
+
+// ── API ───────────────────────────────────────────────────────────────────────
+
 export const api = {
+  auth: {
+    login(username: string, password: string): Promise<TokenResponse> {
+      if (config.mockApi) return mockApi.auth.login(username, password)
+      return request('/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ username, password }),
+      })
+    },
+    register(payload: {
+      account_name: string
+      account_domain: string
+      email: string
+      username: string
+      password: string
+    }): Promise<UserOut> {
+      if (config.mockApi) return mockApi.auth.register(payload)
+      return request('/auth/register', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      })
+    },
+    logout(refresh_token: string): Promise<void> {
+      if (config.mockApi) return mockApi.auth.logout(refresh_token)
+      return request('/auth/logout', {
+        method: 'POST',
+        body: JSON.stringify({ refresh_token }),
+      })
+    },
+  },
+
   chat(message: string, conversationId?: string): Promise<ChatResponse> {
+    if (config.mockApi) return mockApi.chat(message, conversationId)
     return request('/chat', {
       method: 'POST',
       body: JSON.stringify({ message, conversation_id: conversationId ?? null }),
     })
   },
 
-  getConversations() {
-    return request<Array<{ id: string; title: string | null; created_at: string }>>('/chat/conversations')
+  getConversations(): Promise<ConversationOut[]> {
+    if (config.mockApi) return mockApi.getConversations()
+    return request('/chat/conversations')
   },
 
-  getConversation(id: string) {
+  getConversation(id: string): Promise<ConversationOut> {
+    if (config.mockApi) return mockApi.getConversation(id)
     return request(`/chat/conversations/${id}`)
   },
 }

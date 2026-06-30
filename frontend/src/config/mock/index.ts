@@ -1,10 +1,18 @@
-import type { ChatResponse, TokenResponse, UserOut, ConversationOut } from '../../api/client'
+import type { ChatResponse, TokenResponse, UserOut, ConversationOut, OrgSettings, WarehouseConfig, CloudConfig, ConnectionTestResult } from '../../api/client'
 import {
   MOCK_TOKENS,
   MOCK_USER,
   MOCK_CONVERSATIONS,
   mockChatReply,
+  MOCK_ORG,
+  MOCK_WAREHOUSE,
+  MOCK_CLOUD,
 } from './data'
+
+let mockProfile = { ...MOCK_USER }
+let mockOrg = { ...MOCK_ORG }
+let mockWarehouse = { ...MOCK_WAREHOUSE }
+let mockCloud = { ...MOCK_CLOUD }
 
 function delay(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -53,5 +61,58 @@ export const mockApi = {
     const found = MOCK_CONVERSATIONS.find(c => c.id === id)
     if (!found) throw new Error('Conversation not found')
     return { ...found }
+  },
+
+  async getProfile(): Promise<UserOut> {
+    await delay(200)
+    return { ...mockProfile }
+  },
+
+  async updateProfile(data: { username: string; email: string }): Promise<UserOut> {
+    await delay(500)
+    mockProfile = { ...mockProfile, ...data }
+    return { ...mockProfile }
+  },
+
+  async updatePassword(_data: { current: string; next: string }): Promise<void> {
+    await delay(600)
+  },
+
+  async getOrgSettings(): Promise<OrgSettings> {
+    await delay(200)
+    return { ...mockOrg }
+  },
+
+  async updateOrgSettings(data: OrgSettings): Promise<OrgSettings> {
+    await delay(500)
+    mockOrg = { ...data }
+    return { ...mockOrg }
+  },
+
+  async getWarehouseConfig(): Promise<WarehouseConfig> {
+    await delay(200)
+    return { ...mockWarehouse }
+  },
+
+  async updateWarehouseConfig(data: WarehouseConfig): Promise<WarehouseConfig> {
+    await delay(500)
+    mockWarehouse = { ...data }
+    return { ...mockWarehouse }
+  },
+
+  async testWarehouseConnection(_data: WarehouseConfig): Promise<ConnectionTestResult> {
+    await delay(1200)
+    return { ok: true, message: 'Connected successfully to COMPUTE_WH' }
+  },
+
+  async getCloudConfig(): Promise<CloudConfig> {
+    await delay(200)
+    return { ...mockCloud }
+  },
+
+  async updateCloudConfig(data: CloudConfig): Promise<CloudConfig> {
+    await delay(500)
+    mockCloud = { ...data }
+    return { ...mockCloud }
   },
 }

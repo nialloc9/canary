@@ -29,6 +29,38 @@ export interface ConversationOut {
   created_at: string
 }
 
+export interface OrgSettings {
+  name: string
+  domain: string
+}
+
+export type WarehouseType = 'snowflake'
+
+export interface WarehouseConfig {
+  type: WarehouseType
+  account: string
+  username: string
+  password?: string
+  database: string
+  schema: string
+  warehouse: string
+  role: string
+}
+
+export type CloudProvider = 'aws'
+
+export interface CloudConfig {
+  provider: CloudProvider
+  accessKeyId: string
+  secretAccessKey?: string
+  region: string
+}
+
+export interface ConnectionTestResult {
+  ok: boolean
+  message: string
+}
+
 // ── HTTP helper ───────────────────────────────────────────────────────────────
 
 function getToken(): string | null {
@@ -101,5 +133,55 @@ export const api = {
   getConversation(id: string): Promise<ConversationOut> {
     if (config.mockApi) return mockApi.getConversation(id)
     return request(`/chat/conversations/${id}`)
+  },
+
+  getProfile(): Promise<UserOut> {
+    if (config.mockApi) return mockApi.getProfile()
+    return request('/users/me')
+  },
+
+  updateProfile(data: { username: string; email: string }): Promise<UserOut> {
+    if (config.mockApi) return mockApi.updateProfile(data)
+    return request('/users/me', { method: 'PATCH', body: JSON.stringify(data) })
+  },
+
+  updatePassword(data: { current: string; next: string }): Promise<void> {
+    if (config.mockApi) return mockApi.updatePassword(data)
+    return request('/users/me/password', { method: 'PUT', body: JSON.stringify(data) })
+  },
+
+  getOrgSettings(): Promise<OrgSettings> {
+    if (config.mockApi) return mockApi.getOrgSettings()
+    return request('/org/settings')
+  },
+
+  updateOrgSettings(data: OrgSettings): Promise<OrgSettings> {
+    if (config.mockApi) return mockApi.updateOrgSettings(data)
+    return request('/org/settings', { method: 'PUT', body: JSON.stringify(data) })
+  },
+
+  getWarehouseConfig(): Promise<WarehouseConfig> {
+    if (config.mockApi) return mockApi.getWarehouseConfig()
+    return request('/org/warehouse')
+  },
+
+  updateWarehouseConfig(data: WarehouseConfig): Promise<WarehouseConfig> {
+    if (config.mockApi) return mockApi.updateWarehouseConfig(data)
+    return request('/org/warehouse', { method: 'PUT', body: JSON.stringify(data) })
+  },
+
+  testWarehouseConnection(data: WarehouseConfig): Promise<ConnectionTestResult> {
+    if (config.mockApi) return mockApi.testWarehouseConnection(data)
+    return request('/org/warehouse/test', { method: 'POST', body: JSON.stringify(data) })
+  },
+
+  getCloudConfig(): Promise<CloudConfig> {
+    if (config.mockApi) return mockApi.getCloudConfig()
+    return request('/org/cloud')
+  },
+
+  updateCloudConfig(data: CloudConfig): Promise<CloudConfig> {
+    if (config.mockApi) return mockApi.updateCloudConfig(data)
+    return request('/org/cloud', { method: 'PUT', body: JSON.stringify(data) })
   },
 }

@@ -1,4 +1,4 @@
-import type { TokenResponse, UserOut, ConversationOut } from '../../api/client'
+import type { TokenResponse, UserOut, ConversationOut, OrgSettings, WarehouseConfig, CloudConfig } from '../../api/client'
 
 export const MOCK_TOKENS: TokenResponse = {
   access_token: 'mock-access-token',
@@ -12,6 +12,29 @@ export const MOCK_USER: UserOut = {
   username: 'demo',
   is_active: true,
   created_at: new Date().toISOString(),
+}
+
+export let MOCK_PROFILE: UserOut = { ...MOCK_USER }
+
+export const MOCK_ORG: OrgSettings = {
+  name: 'Canary Demo Org',
+  domain: 'canary.ai',
+}
+
+export const MOCK_WAREHOUSE: WarehouseConfig = {
+  type: 'snowflake',
+  account: 'demo-org.us-east-1',
+  username: 'svc_canary',
+  database: 'ANALYTICS',
+  schema: 'PUBLIC',
+  warehouse: 'COMPUTE_WH',
+  role: 'SYSADMIN',
+}
+
+export const MOCK_CLOUD: CloudConfig = {
+  provider: 'aws',
+  accessKeyId: 'AKIAIOSFODNN7EXAMPLE',
+  region: 'us-east-1',
 }
 
 export const MOCK_CONVERSATIONS: ConversationOut[] = [

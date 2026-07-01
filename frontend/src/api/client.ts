@@ -35,16 +35,19 @@ export interface OrgSettings {
 }
 
 export type WarehouseType = 'snowflake'
+export type WarehouseAuthMethod = 'SNOWFLAKE' | 'SNOWFLAKE_JWT'
 
 export interface WarehouseConfig {
   type: WarehouseType
   account: string
   username: string
-  password?: string
-  database: string
-  schema: string
-  warehouse: string
-  role: string
+  authenticator: WarehouseAuthMethod
+  password?: string | null
+  privateKeyB64?: string | null
+  database?: string
+  schema?: string
+  warehouse?: string
+  role?: string
 }
 
 export type CloudProvider = 'aws'
@@ -59,6 +62,56 @@ export interface CloudConfig {
 export interface ConnectionTestResult {
   ok: boolean
   message: string
+}
+
+export interface ProjectOut {
+  id: string
+  name: string
+  version_control_created: boolean
+  cicd_created: boolean
+  warehouse_created: boolean
+  infrastructure_bootstrapped: boolean
+  created_at: string
+}
+
+export interface GitHubRepoOut {
+  id: string
+  project_name: string
+  repo_full_name: string
+  branch: string
+  api_url: string
+  infrastructure_base_path: string
+  auto_merge: boolean
+  create_cicd: boolean
+  skip_bootstrap: boolean
+  skip_module_import: boolean
+  dev_state_bucket: string | null
+  dev_state_region: string | null
+  dev_state_lock_table: string | null
+  prod_state_bucket: string | null
+  prod_state_region: string | null
+  prod_state_lock_table: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface GitHubRepoConnect {
+  project_name: string
+  repo_full_name: string
+  branch: string
+  token: string
+  api_url: string
+  infrastructure_base_path: string
+  auto_merge: boolean
+  create_cicd: boolean
+  skip_bootstrap: boolean
+  skip_module_import: boolean
+  dev_state_bucket?: string
+  dev_state_region?: string
+  dev_state_lock_table?: string
+  prod_state_bucket?: string
+  prod_state_region?: string
+  prod_state_lock_table?: string
 }
 
 // ── HTTP helper ───────────────────────────────────────────────────────────────
@@ -183,5 +236,21 @@ export const api = {
   updateCloudConfig(data: CloudConfig): Promise<CloudConfig> {
     if (config.mockApi) return mockApi.updateCloudConfig(data)
     return request('/org/cloud', { method: 'PUT', body: JSON.stringify(data) })
+  },
+
+  listProjects(): Promise<ProjectOut[]> {
+    return request('/projects')
+  },
+
+  connectRepo(data: GitHubRepoConnect): Promise<GitHubRepoOut> {
+    return request('/github/repos', { method: 'POST', body: JSON.stringify(data) })
+  },
+
+  getRepo(projectName: string): Promise<GitHubRepoOut> {
+    return request(`/github/repos/${projectName}`)
+  },
+
+  disconnectRepo(projectName: string): Promise<void> {
+    return request(`/github/repos/${projectName}`, { method: 'DELETE' })
   },
 }

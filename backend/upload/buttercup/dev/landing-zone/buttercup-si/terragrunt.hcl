@@ -10,8 +10,8 @@ dependency "lz" {
   config_path = "../buttercup-lz"
 
   mock_outputs = {
-    s3_bucket_arn  = "arn:aws:s3:::mock-buttercup-bucket"
-    s3_bucket_name = "mock-buttercup-bucket"
+    s3_bucket_arn  = "arn:aws:s3:::MOCK_BUTTERCUP_BUCKET"
+    s3_bucket_name = "MOCK_BUTTERCUP_BUCKET"
   }
   mock_outputs_allowed_terraform_commands = ["validate", "plan"]
 }
@@ -38,7 +38,7 @@ inputs = {
   name            = "buttercup"
   s3_bucket_arn   = dependency.lz.outputs.s3_bucket_arn
   s3_bucket_name  = dependency.lz.outputs.s3_bucket_name
-  s3_stage_prefix = "data/"
+  s3_stage_prefix = "hot-confidential/7-days/aura-data-export"
 
   snowflake_database = dependency.db.outputs.name
   snowflake_schema   = dependency.db_arch.outputs.landing_zone_schema_name

@@ -97,6 +97,8 @@ class GitHubRepo(Base):
     infrastructure_base_path: Mapped[str] = mapped_column(String(512), nullable=False, default="infrastructure")
     auto_merge: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     create_cicd: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    skip_bootstrap: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    skip_module_import: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     dev_state_bucket: Mapped[str | None] = mapped_column(String(512), nullable=True)
     dev_state_region: Mapped[str | None] = mapped_column(String(50), nullable=True)
     dev_state_lock_table: Mapped[str | None] = mapped_column(String(255), nullable=True)

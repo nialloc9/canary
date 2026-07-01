@@ -1,31 +1,46 @@
-API_BASE_URL = "http://backend:8000/api/v1"
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).parent / ".env")
+
+
+def _bool(key: str, default: bool = False) -> bool:
+    return os.getenv(key, str(default)).lower() == "true"
+
+
+API_BASE_URL = os.getenv("API_BASE_URL", "http://backend:8000/api/v1")
 
 ACCOUNT = {
-    "account_name": "Canary Test 1",
-    "account_domain": "canary.dev",
-    "username": "canary-test-1",
-    "email": "canary-test-1@canary.dev",
-    "password": "canary-test-1!",
+    "account_name": os.getenv("ACCOUNT_NAME", ""),
+    "account_domain": os.getenv("ACCOUNT_DOMAIN", ""),
+    "username": os.getenv("ACCOUNT_USERNAME", ""),
+    "email": os.getenv("ACCOUNT_EMAIL", ""),
+    "password": os.getenv("ACCOUNT_PASSWORD", ""),
 }
 
 GITHUB = {
-    "project_name": "canary-test-1",
-    "repo_full_name": "nialloc9/canary-test-1",
-    "branch": "develop",
-    "infrastructure_base_path": "infrastructure",
-    "api_url": "https://api.github.com",
+    "project_name": os.getenv("GITHUB_PROJECT_NAME", ""),
+    "repo_full_name": os.getenv("GITHUB_REPO_FULL_NAME", ""),
+    "branch": os.getenv("GITHUB_BRANCH", "develop"),
+    "infrastructure_base_path": os.getenv("GITHUB_INFRA_BASE_PATH", "infrastructure"),
+    "api_url": os.getenv("GITHUB_API_URL", "https://api.github.com"),
+    "create_cicd": _bool("GITHUB_CREATE_CICD", True),
+    "auto_merge": _bool("GITHUB_AUTO_MERGE", False),
+    "skip_bootstrap": _bool("GITHUB_SKIP_BOOTSTRAP", False),
+    "skip_module_import": _bool("GITHUB_SKIP_MODULE_IMPORT", False),
 }
 
 WAREHOUSE = {
-    "name": "canary_wh",
-    "type": "snowflake",
+    "name": os.getenv("WAREHOUSE_NAME", ""),
+    "type": os.getenv("WAREHOUSE_TYPE", "snowflake"),
 }
 
 BOOTSTRAP = {
-    "dev_state_bucket": "canary-test-1-dev-terraform-state",
-    "dev_state_region": "eu-west-1",
-    "dev_state_lock_table": "canary-test-1-dev-terraform-lock",
-    "prod_state_bucket": "canary-test-1-prod-terraform-state",
-    "prod_state_region": "eu-west-1",
-    "prod_state_lock_table": "canary-test-1-prod-terraform-lock",
+    "dev_state_bucket": os.getenv("BOOTSTRAP_DEV_STATE_BUCKET", ""),
+    "dev_state_region": os.getenv("BOOTSTRAP_DEV_STATE_REGION", "eu-west-1"),
+    "dev_state_lock_table": os.getenv("BOOTSTRAP_DEV_STATE_LOCK_TABLE", ""),
+    "prod_state_bucket": os.getenv("BOOTSTRAP_PROD_STATE_BUCKET", ""),
+    "prod_state_region": os.getenv("BOOTSTRAP_PROD_STATE_REGION", "eu-west-1"),
+    "prod_state_lock_table": os.getenv("BOOTSTRAP_PROD_STATE_LOCK_TABLE", ""),
 }

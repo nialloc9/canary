@@ -1,7 +1,7 @@
 locals {
-  env_name         = "buttercup-lz"
+  env_name         = "aura"
   env_type         = "prod"
-  state_bucket     = "canary-test-1-prod-terraform-state"
+  state_bucket     = "aura-infra-prod-terraform-state"
   state_region     = "eu-west-1"
-  state_lock_table = "canary-test-1-prod-terraform-lock"
+  state_lock_table = "aura-infra-prod-terraform-lock"
 }

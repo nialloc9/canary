@@ -12,6 +12,7 @@ class GitHubRepoConnect(BaseModel):
     auto_merge: bool = False
     create_cicd: bool = True
     skip_bootstrap: bool = False
+    skip_module_import: bool = False
     dev_state_bucket: str | None = None
     dev_state_region: str | None = None
     dev_state_lock_table: str | None = None
@@ -41,6 +42,8 @@ class GitHubRepoOut(BaseModel):
     infrastructure_base_path: str
     auto_merge: bool
     create_cicd: bool
+    skip_bootstrap: bool
+    skip_module_import: bool
     dev_state_bucket: str | None
     dev_state_region: str | None
     dev_state_lock_table: str | None

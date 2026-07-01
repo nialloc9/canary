@@ -69,7 +69,7 @@ class GitHubService:
             if org
             else f"{self._api_url}/user/repos"
         )
-        async with httpx.AsyncClient(headers=self._headers) as client:
+        async with httpx.AsyncClient(headers=self._headers, timeout=30.0) as client:
             resp = await client.post(url, json={
                 "name": name,
                 "private": private,
@@ -88,7 +88,7 @@ class GitHubService:
 
     async def validate(self) -> dict:
         """Check that the token has access to the repo. Returns repo metadata."""
-        async with httpx.AsyncClient(headers=self._headers) as client:
+        async with httpx.AsyncClient(headers=self._headers, timeout=30.0) as client:
             resp = await client.get(self._repo_url(""))
             self._raise_for(resp, "Failed to access repository")
             data = resp.json()
@@ -101,7 +101,7 @@ class GitHubService:
 
     async def set_secrets(self, secrets: dict[str, str]) -> None:
         """Encrypt and upload a dict of secrets to the repo via the Actions Secrets API."""
-        async with httpx.AsyncClient(headers=self._headers) as client:
+        async with httpx.AsyncClient(headers=self._headers, timeout=30.0) as client:
             key_resp = await client.get(self._repo_url("/actions/secrets/public-key"))
             self._raise_for(key_resp, "Failed to fetch repo public key")
             key_data = key_resp.json()
@@ -121,7 +121,7 @@ class GitHubService:
 
     async def merge_pull_request(self, pr_number: int, commit_message: str = "") -> None:
         """Merge an open pull request via squash merge."""
-        async with httpx.AsyncClient(headers=self._headers) as client:
+        async with httpx.AsyncClient(headers=self._headers, timeout=30.0) as client:
             resp = await client.put(
                 self._repo_url(f"/pulls/{pr_number}/merge"),
                 json={"merge_method": "squash", "commit_message": commit_message},
@@ -153,7 +153,7 @@ class GitHubService:
         if not files:
             raise GitHubError("No files to commit")
 
-        async with httpx.AsyncClient(headers=self._headers) as client:
+        async with httpx.AsyncClient(headers=self._headers, timeout=30.0) as client:
             base_commit_sha, base_tree_sha = await self._get_branch_state(client)
             await self._create_branch(client, feature_branch, base_commit_sha)
             tree_sha = await self._create_tree(client, files, base_tree_sha)

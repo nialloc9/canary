@@ -15,3 +15,13 @@ async def get_current_account_id(
         return payload["account_id"]
     except (AuthError, KeyError) as exc:
         raise HTTPException(status_code=401, detail=str(exc))
+
+
+async def get_current_user_id(
+    credentials: HTTPAuthorizationCredentials = Depends(_bearer),
+) -> str:
+    try:
+        payload = auth_service.decode_access_token(credentials.credentials)
+        return payload["sub"]
+    except (AuthError, KeyError) as exc:
+        raise HTTPException(status_code=401, detail=str(exc))

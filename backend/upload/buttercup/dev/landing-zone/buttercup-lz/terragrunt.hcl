@@ -9,19 +9,20 @@ terraform {
 inputs = {
   name = "buttercup"
   env  = "dev"
+  existing_s3_bucket_arn = "arn:aws:s3:::linq-customer-cold-confidential-hw-buttercup-1-atmta068"
 
   create_access_keys = false
 
-  transition_to_ia_days      = 30
-  transition_to_glacier_days = 90
-  expiration_days            = 365
+  transition_to_ia_days      = 0
+  transition_to_glacier_days = 0
+  expiration_days            = 30
 
   tags = {
-    data_classification = "internal"
-    retention_policy    = "1-year"
-    data_owner          = "niall"
-    department          = "engineering"
+    data_classification = "confidential"
+    retention_policy    = "30-day"
+    data_owner          = "data"
+    department          = "none"
     cost_center         = "none"
-    project_code        = "canary-test-1"
+    project_code        = "aura-infra"
   }
 }

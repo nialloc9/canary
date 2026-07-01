@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.tools.base import BaseTool
 from app.tools.terraform.s3 import LandingZoneTool
 from app.tools.terraform.snowflake_pipe import SnowflakePipeTool
+from app.tools.terraform.update import UpdateLandingZoneTool
 
 
 class ToolRegistry:
@@ -12,6 +13,7 @@ class ToolRegistry:
 
     def _register_defaults(self, db: AsyncSession, account_id: str) -> None:
         self.register(LandingZoneTool(db, account_id))
+        self.register(UpdateLandingZoneTool(db, account_id))
         self.register(SnowflakePipeTool(db, account_id))
 
     def register(self, tool: BaseTool) -> None:

@@ -10,13 +10,13 @@ dependency "database" {
   config_path = "../buttercup-db"
 
   mock_outputs = {
-    name = "mock-buttercup"
+    name = "MOCK_BUTTERCUP"
   }
   mock_outputs_allowed_terraform_commands = ["validate", "plan"]
 }
 
 inputs = {
   database_name       = dependency.database.outputs.name
-  data_classification = "internal"
+  data_classification = "confidential"
   schema_names        = ["bronze", "silver", "gold", "platinum"]
 }

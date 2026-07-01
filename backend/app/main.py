@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
 from app.core.database import db
-from app.api.routes import chat, health, github, auth, snowflake, projects
+from app.api.routes import chat, health, github, auth, snowflake, projects, users, org
 
 settings = get_settings()
 
@@ -36,3 +36,5 @@ app.include_router(chat.router, prefix=settings.api_prefix)
 app.include_router(github.router, prefix=settings.api_prefix)
 app.include_router(snowflake.router, prefix=settings.api_prefix)
 app.include_router(projects.router, prefix=settings.api_prefix)
+app.include_router(users.router, prefix=settings.api_prefix)
+app.include_router(org.router, prefix=settings.api_prefix)

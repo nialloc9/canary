@@ -246,9 +246,9 @@ def global_hcl(name: str, extra_tags_hcl: str) -> str:
 '''
 
 
-def env_hcl(name: str, env: str, state_bucket: str, state_region: str, state_lock_table: str) -> str:
+def env_hcl(account_slug: str, env: str, state_bucket: str, state_region: str, state_lock_table: str) -> str:
     return f'''locals {{
-  env_name         = "{name}-lz"
+  env_name         = "{account_slug}"
   env_type         = "{env}"
   state_bucket     = "{state_bucket}"
   state_region     = "{state_region}"
@@ -293,7 +293,7 @@ dependency "database" {{
   config_path = "../{name}-db"
 
   mock_outputs = {{
-    name = "mock-{name}"
+    name = "MOCK_{name.upper().replace('-', '_')}"
   }}
   mock_outputs_allowed_terraform_commands = ["validate", "plan"]
 }}
@@ -418,8 +418,8 @@ dependency "lz" {{
   config_path = "../{name}-lz"
 
   mock_outputs = {{
-    bucket_id  = "mock-{name}-bucket"
-    stage_name = "MOCK_DB.MOCK_SCHEMA.MOCK_{name.upper().replace("-", "_")}_STAGE"
+    bucket_id  = "MOCK_{name.upper().replace('-', '_')}_BUCKET"
+    stage_name = "MOCK_DB.MOCK_SCHEMA.MOCK_{name.upper().replace('-', '_')}_STAGE"
   }}
   mock_outputs_allowed_terraform_commands = ["validate", "plan"]
 }}
@@ -504,8 +504,8 @@ dependency "lz" {{
   config_path = "../{name}-lz"
 
   mock_outputs = {{
-    s3_bucket_arn  = "arn:aws:s3:::mock-{name}-bucket"
-    s3_bucket_name = "mock-{name}-bucket"
+    s3_bucket_arn  = "arn:aws:s3:::MOCK_{name.upper().replace('-', '_')}_BUCKET"
+    s3_bucket_name = "MOCK_{name.upper().replace('-', '_')}_BUCKET"
   }}
   mock_outputs_allowed_terraform_commands = ["validate", "plan"]
 }}
@@ -514,7 +514,7 @@ dependency "db" {{
   config_path = "../{name}-db"
 
   mock_outputs = {{
-    name = "MOCK_{name.upper().replace("-", "_")}"
+    name = "MOCK_{name.upper().replace('-', '_')}"
   }}
   mock_outputs_allowed_terraform_commands = ["validate", "plan"]
 }}

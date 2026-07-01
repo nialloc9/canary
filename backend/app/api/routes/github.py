@@ -73,6 +73,8 @@ async def connect_repo(
         record.infrastructure_base_path = payload.infrastructure_base_path
         record.auto_merge = payload.auto_merge
         record.create_cicd = payload.create_cicd
+        record.skip_bootstrap = payload.skip_bootstrap
+        record.skip_module_import = payload.skip_module_import
         if payload.dev_state_bucket is not None:
             record.dev_state_bucket = payload.dev_state_bucket
         if payload.dev_state_region is not None:
@@ -96,6 +98,8 @@ async def connect_repo(
             infrastructure_base_path=payload.infrastructure_base_path,
             auto_merge=payload.auto_merge,
             create_cicd=payload.create_cicd,
+            skip_bootstrap=payload.skip_bootstrap,
+            skip_module_import=payload.skip_module_import,
             dev_state_bucket=payload.dev_state_bucket,
             dev_state_region=payload.dev_state_region,
             dev_state_lock_table=payload.dev_state_lock_table,

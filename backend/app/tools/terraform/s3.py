@@ -9,6 +9,7 @@ from sqlalchemy import select
 from app.tools.base import BaseTool
 import app.tools.terraform.templates as templates
 from app.models.project import GitHubRepo, SnowflakeCredentials, Project
+from app.models.user import Account
 from app.services.github_service import GitHubService, GitHubError
 
 TERRAFORM_MODULES_DIR = Path(__file__).resolve().parents[3] / "terraform" / "modules"
@@ -90,21 +91,6 @@ class LandingZoneTool(BaseTool):
                     "description": "ARN of an existing bucket to reuse. Leave empty to create new.",
                     "default": "",
                 },
-                "transition_to_ia_days": {
-                    "type": "integer",
-                    "description": "Days before transition to STANDARD_IA (0 to skip)",
-                    "default": 30,
-                },
-                "transition_to_glacier_days": {
-                    "type": "integer",
-                    "description": "Days before transition to GLACIER (0 to skip)",
-                    "default": 90,
-                },
-                "expiration_days": {
-                    "type": "integer",
-                    "description": "Days before objects expire (0 to disable)",
-                    "default": 365,
-                },
                 "s3_stage_prefix": {
                     "type": "string",
                     "description": "Key prefix within the bucket for the Snowflake stage",
@@ -153,34 +139,40 @@ class LandingZoneTool(BaseTool):
         project_code: str = "none",
         kms_key_arn: str = "",
         existing_s3_bucket_arn: str = "",
-        transition_to_ia_days: int = 30,
-        transition_to_glacier_days: int = 90,
-        expiration_days: int = 365,
         s3_stage_prefix: str = "data/",
         file_format_type: str = "JSON",
         create_access_keys: bool = False,
         schema_names: list[str] = None,
         tags: dict = {},
+        _action: str = "add",
     ) -> str:
         if schema_names is None:
             schema_names = ["bronze", "silver", "gold", "platinum"]
 
+        transition_to_ia_days, transition_to_glacier_days, expiration_days = (
+            self._lifecycle_days(retention_policy)
+        )
+
         upload_root = Path(__file__).resolve().parents[3] / "upload" / name
         shutil.rmtree(upload_root, ignore_errors=True)
         os.makedirs(upload_root)
+
+        account = await self._get_account()
+        account_slug = account.name.lower().replace(" ", "-") if account else project_code
 
         project = await self._get_project(project_code)
         if project is None:
             return f"No project named '{project_code}' found. Connect a GitHub repo first via POST /api/v1/github/repos."
         if not project.version_control_created:
             return f"GitHub repo not yet connected for project '{project_code}'. Use POST /api/v1/github/repos."
-        if not project.infrastructure_bootstrapped:
+        repo_record = await self._get_github_repo(project_code)
+
+        if not project.infrastructure_bootstrapped and not (repo_record and repo_record.skip_bootstrap):
             return (
                 f"Infrastructure not yet bootstrapped for project '{project_code}'. "
                 f"Call POST /api/v1/projects/{project_code}/bootstrap first."
             )
 
-        repo_record = await self._get_github_repo(project_code)
         if repo_record and repo_record.create_cicd and not project.cicd_created:
             return (
                 f"CI/CD not yet created for project '{project_code}'. "
@@ -200,8 +192,10 @@ class LandingZoneTool(BaseTool):
             },
         }
 
-        self._copy_modules(upload_root)
-        self._write_root_hcl(upload_root, name, region, tags)
+        if not (repo_record and repo_record.skip_module_import):
+            self._copy_modules(upload_root)
+        if not (repo_record and repo_record.skip_bootstrap):
+            self._write_root_hcl(upload_root, name, region, tags)
 
         schemas_hcl = ", ".join(f'"{s}"' for s in schema_names)
 
@@ -212,7 +206,7 @@ class LandingZoneTool(BaseTool):
             os.makedirs(env_dir, exist_ok=True)
 
             (env_top_dir / "env.hcl").write_text(templates.env_hcl(
-                name, env,
+                account_slug, env,
                 state_bucket=sc["bucket"],
                 state_region=sc["region"],
                 state_lock_table=sc["lock_table"],
@@ -267,6 +261,7 @@ class LandingZoneTool(BaseTool):
             data_classification=data_classification,
             retention_policy=retention_policy,
             schema_names=schema_names,
+            action=_action,
         )
 
         return (
@@ -307,6 +302,7 @@ class LandingZoneTool(BaseTool):
         data_classification: str,
         retention_policy: str,
         schema_names: list[str],
+        action: str = "add",
     ) -> str:
         result = await self._db.execute(
             select(GitHubRepo).where(
@@ -322,21 +318,23 @@ class LandingZoneTool(BaseTool):
                 return "\n  GitHub: no base connection found — use POST /api/v1/github/repos to connect one first\n\n"
 
         slug = datetime.now().strftime("%Y%m%d-%H%M%S")
-        feature_branch = f"feat/{landing_zone_name}-landing-zone-{slug}"
+        conv_type = "feat" if action == "add" else "chore"
+        feature_branch = f"{conv_type}/{landing_zone_name}-landing-zone-{slug}"
 
         commit_message = (
-            f"feat(landing-zone): add {landing_zone_name} landing zone\n\n"
+            f"{conv_type}(landing-zone): {action} {landing_zone_name} landing zone\n\n"
             f"- Data classification: {data_classification}\n"
             f"- Retention policy: {retention_policy}\n"
             f"- Schemas: {', '.join(schema_names)}\n"
             f"- Environments: dev, prod"
         )
 
-        pr_title = f"feat(landing-zone): add {landing_zone_name} landing zone"
+        pr_title = f"{conv_type}(landing-zone): {action} {landing_zone_name} landing zone"
 
+        summary_verb = "Adds" if action == "add" else "Updates"
         pr_body = (
             f"## Summary\n\n"
-            f"Adds a full landing zone for `{landing_zone_name}`.\n\n"
+            f"{summary_verb} the landing zone for `{landing_zone_name}`.\n\n"
             f"- **`{landing_zone_name}-db`** — Snowflake database\n"
             f"- **`{landing_zone_name}-db-arch`** — Medallion schemas "
             f"({', '.join(f'`{s}`' for s in schema_names)})\n"
@@ -425,6 +423,23 @@ class LandingZoneTool(BaseTool):
         self._db.add(record)
         await self._db.flush()
         return record
+
+    @staticmethod
+    def _lifecycle_days(retention_policy: str) -> tuple[int, int, int]:
+        """Return (transition_to_ia_days, transition_to_glacier_days, expiration_days)."""
+        return {
+            "30-day":     (0,  0,  30),
+            "90-day":     (30, 0,  90),
+            "1-year":     (30, 90, 365),
+            "7-year":     (30, 90, 2555),
+            "indefinite": (30, 90, 0),
+        }.get(retention_policy, (30, 90, 365))
+
+    async def _get_account(self) -> "Account | None":
+        result = await self._db.execute(
+            select(Account).where(Account.id == self._account_id)
+        )
+        return result.scalar_one_or_none()
 
     async def _get_project(self, project_name: str) -> "Project | None":
         result = await self._db.execute(

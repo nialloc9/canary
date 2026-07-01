@@ -8,20 +8,23 @@ from sqlalchemy import select
 
 from app.api.deps import get_current_account_id
 from app.core.database import get_db
-from app.models.project import Project, GitHubRepo, CiCd, SnowflakeCredentials, Warehouse
+from app.models.project import Project, GitHubRepo, CiCd
+from app.models.stack import Stack, StackStateBackend
 from app.schemas.project import (
     ProjectOut,
-    ProjectCiCdRequest,
     ProjectCiCdResponse,
-    ProjectWarehouseRequest,
-    ProjectWarehouseResponse,
     ProjectBootstrapRequest,
     ProjectBootstrapResponse,
+    StackStateOut,
 )
 import app.tools.terraform.templates as templates
 from app.services.github_service import GitHubService, GitHubError
 
 router = APIRouter(prefix="/projects", tags=["projects"])
+
+
+def _secret_suffix(stack_name: str) -> str:
+    return stack_name.upper().replace("-", "_")
 
 
 async def _get_project_or_404(name: str, account_id: str, db: AsyncSession) -> Project:
@@ -35,6 +38,13 @@ async def _get_project_or_404(name: str, account_id: str, db: AsyncSession) -> P
     if not project:
         raise HTTPException(status_code=404, detail=f"Project '{name}' not found")
     return project
+
+
+async def _get_account_stacks(account_id: str, db: AsyncSession) -> list[Stack]:
+    result = await db.execute(
+        select(Stack).where(Stack.account_id == account_id).order_by(Stack.sort_order)
+    )
+    return list(result.scalars().all())
 
 
 @router.get("", response_model=list[ProjectOut])
@@ -57,52 +67,9 @@ async def get_project(
     return await _get_project_or_404(name, account_id, db)
 
 
-@router.post("/{name}/warehouse", response_model=ProjectWarehouseResponse, status_code=201)
-async def create_warehouse(
-    name: str,
-    payload: ProjectWarehouseRequest,
-    db: AsyncSession = Depends(get_db),
-    account_id: str = Depends(get_current_account_id),
-):
-    project = await _get_project_or_404(name, account_id, db)
-
-    if not project.version_control_created:
-        raise HTTPException(
-            status_code=409,
-            detail="GitHub repo must be connected before creating a warehouse",
-        )
-
-    sf_result = await db.execute(
-        select(SnowflakeCredentials).where(
-            SnowflakeCredentials.account_id == account_id,
-            SnowflakeCredentials.project_name == name,
-        )
-    )
-    sf_creds = sf_result.scalar_one_or_none()
-    if not sf_creds:
-        raise HTTPException(
-            status_code=409,
-            detail=f"No Snowflake credentials found for project '{name}'. Connect Snowflake first via POST /api/v1/snowflake/credentials.",
-        )
-
-    warehouse = Warehouse(
-        account_id=account_id,
-        project_name=name,
-        type=payload.type,
-        name=payload.name,
-        warehouse_credentials_id=sf_creds.id,
-    )
-    db.add(warehouse)
-    project.warehouse_created = True
-    await db.flush()
-
-    return warehouse
-
-
 @router.post("/{name}/cicd", response_model=ProjectCiCdResponse, status_code=201)
 async def create_cicd(
     name: str,
-    payload: ProjectCiCdRequest = ProjectCiCdRequest(),
     db: AsyncSession = Depends(get_db),
     account_id: str = Depends(get_current_account_id),
 ):
@@ -130,27 +97,48 @@ async def create_cicd(
     if not repo.create_cicd:
         raise HTTPException(status_code=409, detail="CI/CD was disabled when connecting this repo")
 
-    sf_result = await db.execute(
-        select(SnowflakeCredentials).where(
-            SnowflakeCredentials.account_id == account_id,
-            SnowflakeCredentials.project_name == name,
-        )
-    )
-    sf_creds = sf_result.scalar_one_or_none()
-    if not sf_creds:
+    stacks = await _get_account_stacks(account_id, db)
+    if not stacks:
+        raise HTTPException(status_code=409, detail="No stacks configured for this account")
+
+    missing_warehouse = [s.name for s in stacks if not s.sf_private_key_b64]
+    if missing_warehouse:
         raise HTTPException(
             status_code=409,
-            detail=f"No Snowflake credentials found for project '{name}'. Connect Snowflake first via POST /api/v1/snowflake/credentials.",
+            detail=f"The following stacks are missing Snowflake credentials: {', '.join(missing_warehouse)}. "
+            "Configure them under Admin → Stacks first.",
+        )
+    missing_cloud = [s.name for s in stacks if not (s.cloud_access_key_id and s.cloud_secret_access_key)]
+    if missing_cloud:
+        raise HTTPException(
+            status_code=409,
+            detail=f"The following stacks are missing AWS credentials: {', '.join(missing_cloud)}. "
+            "Configure them under Admin → Stacks first.",
         )
 
-    state_region = repo.dev_state_region or "eu-west-1"
+    state_backend_result = await db.execute(
+        select(StackStateBackend).where(StackStateBackend.github_repo_id == repo.id)
+    )
+    state_backend_by_stack = {r.stack_id: r for r in state_backend_result.scalars().all()}
+
+    workflow_stacks = [
+        {
+            "name": s.name,
+            "branch": s.branch,
+            "region": state_backend_by_stack[s.id].state_region if s.id in state_backend_by_stack else (s.cloud_region or "eu-west-1"),
+            "sf_organization_name": s.sf_organization_name,
+            "sf_account_name": s.sf_account_name,
+            "sf_user": s.sf_user,
+        }
+        for s in stacks
+    ]
 
     workflow = templates.ci_workflow(
-        snowflake_org=sf_creds.organization_name,
-        snowflake_account=sf_creds.account_name,
-        snowflake_user=sf_creds.user,
-        state_region=state_region,
+        stacks=workflow_stacks,
         infrastructure_base_path=repo.infrastructure_base_path,
+    )
+    bootstrap_workflow_yaml = templates.bootstrap_workflow(
+        stacks=[{"name": s["name"], "branch": s["branch"], "region": s["region"]} for s in workflow_stacks],
     )
 
     slug = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -167,6 +155,28 @@ async def create_cicd(
         "canary-bootstrap.yml",
     ]
 
+    secrets: dict[str, str] = {}
+    for s in stacks:
+        suffix = _secret_suffix(s.name)
+        secrets[f"SNOWFLAKE_ORGANIZATION_NAME__{suffix}"] = s.sf_organization_name
+        secrets[f"SNOWFLAKE_ACCOUNT_NAME__{suffix}"] = s.sf_account_name
+        secrets[f"SNOWFLAKE_USER__{suffix}"] = s.sf_user
+        secrets[f"SNOWFLAKE_AUTHENTICATOR__{suffix}"] = s.sf_authenticator
+        secrets[f"SNOWFLAKE_PRIVATE_KEY_B64__{suffix}"] = s.sf_private_key_b64
+        secrets[f"AWS_ACCESS_KEY_ID__{suffix}"] = s.cloud_access_key_id
+        secrets[f"AWS_SECRET_ACCESS_KEY__{suffix}"] = s.cloud_secret_access_key
+
+    secrets_table = "\n".join(
+        f"| `SNOWFLAKE_ORGANIZATION_NAME__{_secret_suffix(s.name)}` / "
+        f"`SNOWFLAKE_ACCOUNT_NAME__{_secret_suffix(s.name)}` / "
+        f"`SNOWFLAKE_USER__{_secret_suffix(s.name)}` / "
+        f"`SNOWFLAKE_AUTHENTICATOR__{_secret_suffix(s.name)}` / "
+        f"`SNOWFLAKE_PRIVATE_KEY_B64__{_secret_suffix(s.name)}` / "
+        f"`AWS_ACCESS_KEY_ID__{_secret_suffix(s.name)}` / "
+        f"`AWS_SECRET_ACCESS_KEY__{_secret_suffix(s.name)}` | Stack '{s.name}' |"
+        for s in stacks
+    )
+
     with tempfile.TemporaryDirectory() as staging:
         try:
             pr_url, _ = await svc.open_pull_request(
@@ -177,25 +187,16 @@ async def create_cicd(
                 pr_body=(
                     "## Summary\n\n"
                     "Adds CI/CD workflows:\n"
-                    "- `canary-infrastructure-deploy` — Terragrunt plan/apply for landing zones\n"
-                    "- `canary-bootstrap` — Terraform plan/apply for remote state backend\n\n"
-                    "## Secrets configured\n\n"
-                    "| Secret | Source |\n|---|---|\n"
-                    "| `SNOWFLAKE_ORGANIZATION_NAME` | Snowflake credentials |\n"
-                    "| `SNOWFLAKE_ACCOUNT_NAME` | Snowflake credentials |\n"
-                    "| `SNOWFLAKE_USER` | Snowflake credentials |\n"
-                    "| `SNOWFLAKE_AUTHENTICATOR` | Snowflake credentials |\n"
-                    "| `SNOWFLAKE_PRIVATE_KEY_B64` | Snowflake credentials |\n"
-                    "| `AWS_ACCESS_KEY_ID` | Provided at setup |\n"
-                    "| `AWS_SECRET_ACCESS_KEY` | Provided at setup |\n\n"
+                    "- `canary-infrastructure-deploy` — Terragrunt plan/apply for landing zones, one job per stack\n"
+                    "- `canary-bootstrap` — Terraform plan/apply for remote state backend, one job per stack\n\n"
+                    "## Secrets configured (per stack)\n\n"
+                    "| Secrets | Source |\n|---|---|\n"
+                    f"{secrets_table}\n\n"
                     "---\n🤖 Generated by Canary"
                 ),
                 root_files={
                     ".github/workflows/canary-infrastructure-deploy.yml": workflow.encode(),
-                    ".github/workflows/canary-bootstrap.yml": templates.bootstrap_workflow(
-                        dev_state_region=repo.dev_state_region or "eu-west-1",
-                        prod_state_region=repo.prod_state_region or "eu-west-1",
-                    ).encode(),
+                    ".github/workflows/canary-bootstrap.yml": bootstrap_workflow_yaml.encode(),
                 },
             )
         except GitHubError as exc:
@@ -209,18 +210,6 @@ async def create_cicd(
             auto_merged = True
         except GitHubError as exc:
             raise HTTPException(status_code=422, detail=f"Auto-merge failed: {exc}")
-
-    secrets: dict[str, str] = {
-        "SNOWFLAKE_ORGANIZATION_NAME": sf_creds.organization_name,
-        "SNOWFLAKE_ACCOUNT_NAME": sf_creds.account_name,
-        "SNOWFLAKE_USER": sf_creds.user,
-        "SNOWFLAKE_AUTHENTICATOR": sf_creds.authenticator,
-        "SNOWFLAKE_PRIVATE_KEY_B64": sf_creds.private_key_b64,
-    }
-    if payload.aws_access_key_id:
-        secrets["AWS_ACCESS_KEY_ID"] = payload.aws_access_key_id
-    if payload.aws_secret_access_key:
-        secrets["AWS_SECRET_ACCESS_KEY"] = payload.aws_secret_access_key
 
     try:
         await svc.set_secrets(secrets)
@@ -291,19 +280,20 @@ async def bootstrap_infrastructure(
             detail="CI/CD must be created before bootstrapping infrastructure. Call POST /api/v1/projects/{name}/cicd first.",
         )
 
-    dev_state_bucket = payload.dev_state_bucket or f"{name}-dev-terraform-state"
-    dev_state_region = payload.dev_state_region or "eu-west-1"
-    dev_state_lock_table = payload.dev_state_lock_table or f"{name}-dev-terraform-lock"
-    prod_state_bucket = payload.prod_state_bucket or f"{name}-prod-terraform-state"
-    prod_state_region = payload.prod_state_region or "eu-west-1"
-    prod_state_lock_table = payload.prod_state_lock_table or f"{name}-prod-terraform-lock"
+    stacks = await _get_account_stacks(account_id, db)
+    if not stacks:
+        raise HTTPException(status_code=409, detail="No stacks configured for this account")
 
-    repo.dev_state_bucket = dev_state_bucket
-    repo.dev_state_region = dev_state_region
-    repo.dev_state_lock_table = dev_state_lock_table
-    repo.prod_state_bucket = prod_state_bucket
-    repo.prod_state_region = prod_state_region
-    repo.prod_state_lock_table = prod_state_lock_table
+    overrides = payload.overrides or {}
+    stack_states: list[dict] = []
+    for s in stacks:
+        override = overrides.get(s.name)
+        stack_states.append({
+            "stack": s,
+            "bucket": (override.bucket if override else None) or f"{name}-{s.name}-terraform-state",
+            "region": (override.region if override else None) or "eu-west-1",
+            "lock_table": (override.lock_table if override else None) or f"{name}-{s.name}-terraform-lock",
+        })
 
     slug = datetime.now().strftime("%Y%m%d-%H%M%S")
     svc = GitHubService(
@@ -314,24 +304,33 @@ async def bootstrap_infrastructure(
         base_path="",
     )
 
-    bootstrap_files = {
-        "bootstrap/dev/main.tf": templates.state_bootstrap_main(dev_state_bucket, dev_state_region, dev_state_lock_table).encode(),
-        "bootstrap/dev/outputs.tf": templates.state_bootstrap_outputs().encode(),
-        "bootstrap/dev/versions.tf": templates.state_bootstrap_versions().encode(),
-        "bootstrap/prod/main.tf": templates.state_bootstrap_main(prod_state_bucket, prod_state_region, prod_state_lock_table).encode(),
-        "bootstrap/prod/outputs.tf": templates.state_bootstrap_outputs().encode(),
-        "bootstrap/prod/versions.tf": templates.state_bootstrap_versions().encode(),
-    }
+    bootstrap_files: dict[str, bytes] = {}
+    for st in stack_states:
+        stack_name = st["stack"].name
+        bootstrap_files[f"bootstrap/{stack_name}/main.tf"] = templates.state_bootstrap_main(
+            st["bucket"], st["region"], st["lock_table"]
+        ).encode()
+        bootstrap_files[f"bootstrap/{stack_name}/outputs.tf"] = templates.state_bootstrap_outputs().encode()
+        bootstrap_files[f"bootstrap/{stack_name}/versions.tf"] = templates.state_bootstrap_versions().encode()
+
+    table_rows = "\n".join(
+        f"| {st['stack'].name} | `{st['bucket']}` | `{st['region']}` | `{st['lock_table']}` |"
+        for st in stack_states
+    )
+    apply_commands = "\n".join(
+        f"cd bootstrap/{st['stack'].name} && terraform init && terraform apply" for st in stack_states
+    )
+    commit_lines = "\n".join(
+        f"- {st['stack'].name}: {st['bucket']} ({st['region']})" for st in stack_states
+    )
 
     pr_body = (
         f"## Summary\n\n"
-        f"Provisions S3 remote state backends for dev and prod before any infrastructure is applied.\n\n"
-        f"| Environment | S3 Bucket | Region | DynamoDB Table |\n|---|---|---|---|\n"
-        f"| dev | `{dev_state_bucket}` | `{dev_state_region}` | `{dev_state_lock_table}` |\n"
-        f"| prod | `{prod_state_bucket}` | `{prod_state_region}` | `{prod_state_lock_table}` |\n\n"
+        f"Provisions S3 remote state backends for every stack before any infrastructure is applied.\n\n"
+        f"| Stack | S3 Bucket | Region | DynamoDB Table |\n|---|---|---|---|\n"
+        f"{table_rows}\n\n"
         f"## ⚠️ Apply before creating any landing zones\n\n"
-        f"```bash\ncd bootstrap/dev && terraform init && terraform apply\n"
-        f"cd bootstrap/prod && terraform init && terraform apply\n```\n\n"
+        f"```bash\n{apply_commands}\n```\n\n"
         f"---\n🤖 Generated by Canary"
     )
 
@@ -341,9 +340,8 @@ async def bootstrap_infrastructure(
                 local_dir=Path(staging),
                 feature_branch=f"feat/terraform-state-bootstrap-{slug}",
                 commit_message=(
-                    "feat(bootstrap): provision Terraform state backends for dev and prod\n\n"
-                    f"- dev: {dev_state_bucket} ({dev_state_region})\n"
-                    f"- prod: {prod_state_bucket} ({prod_state_region})"
+                    "feat(bootstrap): provision Terraform state backends for all stacks\n\n"
+                    f"{commit_lines}"
                 ),
                 pr_title="feat(bootstrap): provision Terraform state backends",
                 pr_body=pr_body,
@@ -352,15 +350,40 @@ async def bootstrap_infrastructure(
         except GitHubError as exc:
             raise HTTPException(status_code=422, detail=str(exc))
 
+    for st in stack_states:
+        existing = await db.execute(
+            select(StackStateBackend).where(
+                StackStateBackend.github_repo_id == repo.id,
+                StackStateBackend.stack_id == st["stack"].id,
+            )
+        )
+        record = existing.scalar_one_or_none()
+        if record:
+            record.state_bucket = st["bucket"]
+            record.state_region = st["region"]
+            record.state_lock_table = st["lock_table"]
+        else:
+            db.add(StackStateBackend(
+                account_id=account_id,
+                github_repo_id=repo.id,
+                stack_id=st["stack"].id,
+                state_bucket=st["bucket"],
+                state_region=st["region"],
+                state_lock_table=st["lock_table"],
+            ))
+
     project.infrastructure_bootstrapped = True
     await db.flush()
 
     return ProjectBootstrapResponse(
         pr_url=pr_url,
-        dev_state_bucket=dev_state_bucket,
-        dev_state_region=dev_state_region,
-        dev_state_lock_table=dev_state_lock_table,
-        prod_state_bucket=prod_state_bucket,
-        prod_state_region=prod_state_region,
-        prod_state_lock_table=prod_state_lock_table,
+        stacks=[
+            StackStateOut(
+                name=st["stack"].name,
+                bucket=st["bucket"],
+                region=st["region"],
+                lock_table=st["lock_table"],
+            )
+            for st in stack_states
+        ],
     )

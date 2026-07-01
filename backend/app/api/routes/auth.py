@@ -5,6 +5,7 @@ from sqlalchemy import select
 
 from app.core.database import get_db
 from app.models.user import Account, User, RefreshToken
+from app.models.stack import Stack
 from app.schemas.auth import (
     RegisterRequest,
     LoginRequest,
@@ -40,6 +41,9 @@ async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db))
 
     account = Account(name=payload.account_name, domain=payload.account_domain)
     db.add(account)
+    await db.flush()
+
+    db.add(Stack(account_id=account.id, name="main", branch="main", sort_order=0, is_default=True))
     await db.flush()
 
     user = User(

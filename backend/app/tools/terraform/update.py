@@ -11,6 +11,7 @@ from sqlalchemy import select
 from app.core.config import get_settings
 from app.tools.base import BaseTool
 from app.models.project import GitHubRepo
+from app.models.stack import Stack
 
 settings = get_settings()
 
@@ -108,10 +109,14 @@ class UpdateLandingZoneTool(BaseTool):
         if not repo:
             return f"No GitHub repo connected for project '{project_code}'."
 
+        reference_stack = await self._get_reference_stack_name()
+        if not reference_stack:
+            return "No stacks configured for this account. Add one under Admin → Stacks first."
+
         clone_dir = tempfile.mkdtemp(prefix="lz-update-")
         try:
             self._clone(repo, clone_dir)
-            current = await self._extract_config(name, clone_dir, repo.infrastructure_base_path)
+            current = await self._extract_config(name, clone_dir, repo.infrastructure_base_path, reference_stack)
         except subprocess.CalledProcessError as exc:
             shutil.rmtree(clone_dir, ignore_errors=True)
             return f"Failed to clone {repo.repo_full_name}: {exc.stderr.decode()}"
@@ -164,25 +169,27 @@ class UpdateLandingZoneTool(BaseTool):
             capture_output=True,
         )
 
-    async def _extract_config(self, name: str, clone_dir: str, base_path: str) -> dict:
+    async def _extract_config(self, name: str, clone_dir: str, base_path: str, reference_stack: str) -> dict:
         base = Path(clone_dir) / base_path
         files: dict[str, str] = {}
 
-        # Read the files Claude needs to reconstruct config
+        # Read the files Claude needs to reconstruct config, taken from the
+        # account's first stack (lowest sort_order) — every stack shares the
+        # same logical landing-zone config, so any one stack is representative.
         for component in (f"{name}-lz", f"{name}-si", f"{name}-db-arch"):
-            hcl = base / "dev" / "landing-zone" / component / "terragrunt.hcl"
+            hcl = base / reference_stack / "landing-zone" / component / "terragrunt.hcl"
             if hcl.exists():
-                files[f"dev/landing-zone/{component}/terragrunt.hcl"] = hcl.read_text()
+                files[f"{reference_stack}/landing-zone/{component}/terragrunt.hcl"] = hcl.read_text()
 
         for fname in ("region.hcl",):
-            f = base / "dev" / fname
+            f = base / reference_stack / fname
             if f.exists():
-                files[f"dev/{fname}"] = f.read_text()
+                files[f"{reference_stack}/{fname}"] = f.read_text()
 
         if not files:
             raise KeyError(
                 f"No HCL files found for landing zone '{name}' under "
-                f"{base}/dev/landing-zone/ — check the branch has the landing zone merged."
+                f"{base}/{reference_stack}/landing-zone/ — check the branch has the landing zone merged."
             )
 
         files_text = "\n\n".join(f"=== {k} ===\n{v}" for k, v in files.items())
@@ -205,5 +212,14 @@ class UpdateLandingZoneTool(BaseTool):
                 GitHubRepo.account_id == self._account_id,
                 GitHubRepo.project_name == project_name,
             )
+        )
+        return result.scalar_one_or_none()
+
+    async def _get_reference_stack_name(self) -> str | None:
+        result = await self._db.execute(
+            select(Stack.name)
+            .where(Stack.account_id == self._account_id)
+            .order_by(Stack.sort_order)
+            .limit(1)
         )
         return result.scalar_one_or_none()

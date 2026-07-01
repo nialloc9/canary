@@ -1,4 +1,4 @@
-import type { TokenResponse, UserOut, ConversationOut, OrgSettings, WarehouseConfig, CloudConfig } from '../../api/client'
+import type { TokenResponse, UserOut, ConversationOut, OrgSettings, StackOut } from '../../api/client'
 
 export const MOCK_TOKENS: TokenResponse = {
   access_token: 'mock-access-token',
@@ -21,21 +21,35 @@ export const MOCK_ORG: OrgSettings = {
   domain: 'canary.ai',
 }
 
-export const MOCK_WAREHOUSE: WarehouseConfig = {
-  type: 'snowflake',
-  account: 'demo-org.us-east-1',
-  username: 'svc_canary',
-  database: 'ANALYTICS',
-  schema: 'PUBLIC',
-  warehouse: 'COMPUTE_WH',
-  role: 'SYSADMIN',
-}
-
-export const MOCK_CLOUD: CloudConfig = {
-  provider: 'aws',
-  accessKeyId: 'AKIAIOSFODNN7EXAMPLE',
-  region: 'us-east-1',
-}
+export const MOCK_STACKS: StackOut[] = [
+  {
+    id: 'mock-stack-main',
+    name: 'main',
+    branch: 'main',
+    sort_order: 0,
+    is_default: true,
+    warehouse: {
+      type: 'snowflake',
+      organization_name: 'DEMO_ORG',
+      account_name: 'demo-org.us-east-1',
+      user: 'svc_canary',
+      authenticator: 'SNOWFLAKE_JWT',
+      private_key_b64: 'mock-key',
+      database: 'ANALYTICS',
+      schema_: 'PUBLIC',
+      warehouse: 'COMPUTE_WH',
+      role: 'SYSADMIN',
+    },
+    cloud: {
+      provider: 'aws',
+      access_key_id: 'AKIAIOSFODNN7EXAMPLE',
+      secret_access_key: 'mock-secret',
+      region: 'us-east-1',
+    },
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  },
+]
 
 export const MOCK_CONVERSATIONS: ConversationOut[] = [
   {

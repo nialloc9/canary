@@ -1,18 +1,17 @@
-import type { ChatResponse, TokenResponse, UserOut, ConversationOut, OrgSettings, WarehouseConfig, CloudConfig, ConnectionTestResult } from '../../api/client'
+import type { ChatResponse, TokenResponse, UserOut, ConversationOut, OrgSettings, StackOut, StackCreate, StackUpdate, ConnectionTestResult } from '../../api/client'
 import {
   MOCK_TOKENS,
   MOCK_USER,
   MOCK_CONVERSATIONS,
   mockChatReply,
   MOCK_ORG,
-  MOCK_WAREHOUSE,
-  MOCK_CLOUD,
+  MOCK_STACKS,
 } from './data'
 
 let mockProfile = { ...MOCK_USER }
 let mockOrg = { ...MOCK_ORG }
-let mockWarehouse = { ...MOCK_WAREHOUSE }
-let mockCloud = { ...MOCK_CLOUD }
+let mockStacks: StackOut[] = MOCK_STACKS.map(s => ({ ...s, warehouse: { ...s.warehouse }, cloud: { ...s.cloud } }))
+let mockStackCounter = mockStacks.length
 
 function delay(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -89,30 +88,82 @@ export const mockApi = {
     return { ...mockOrg }
   },
 
-  async getWarehouseConfig(): Promise<WarehouseConfig> {
+  async listStacks(): Promise<StackOut[]> {
     await delay(200)
-    return { ...mockWarehouse }
+    return mockStacks.map(s => ({ ...s })).sort((a, b) => a.sort_order - b.sort_order)
   },
 
-  async updateWarehouseConfig(data: WarehouseConfig): Promise<WarehouseConfig> {
-    await delay(500)
-    mockWarehouse = { ...data }
-    return { ...mockWarehouse }
+  async createStack(data: StackCreate): Promise<StackOut> {
+    await delay(400)
+    const created: StackOut = {
+      id: `mock-stack-${++mockStackCounter}`,
+      name: data.name,
+      branch: data.branch ?? data.name,
+      sort_order: mockStacks.length,
+      is_default: false,
+      warehouse: {
+        type: data.warehouse?.type ?? 'snowflake',
+        organization_name: data.warehouse?.organization_name ?? '',
+        account_name: data.warehouse?.account_name ?? '',
+        user: data.warehouse?.user ?? '',
+        authenticator: data.warehouse?.authenticator ?? 'SNOWFLAKE_JWT',
+        private_key_b64: data.warehouse?.private_key_b64 ?? null,
+        database: data.warehouse?.database ?? null,
+        schema_: data.warehouse?.schema_ ?? null,
+        warehouse: data.warehouse?.warehouse ?? null,
+        role: data.warehouse?.role ?? null,
+      },
+      cloud: {
+        provider: data.cloud?.provider ?? 'aws',
+        access_key_id: data.cloud?.access_key_id ?? '',
+        secret_access_key: data.cloud?.secret_access_key ?? null,
+        region: data.cloud?.region ?? 'us-east-1',
+      },
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    }
+    mockStacks = [...mockStacks, created]
+    return { ...created }
   },
 
-  async testWarehouseConnection(_data: WarehouseConfig): Promise<ConnectionTestResult> {
+  async updateStack(id: string, data: StackUpdate): Promise<StackOut> {
+    await delay(400)
+    const index = mockStacks.findIndex(s => s.id === id)
+    if (index === -1) throw new Error('Stack not found')
+    const current = mockStacks[index]
+    mockStacks[index] = {
+      ...current,
+      name: data.name ?? current.name,
+      branch: data.branch ?? current.branch,
+      warehouse: { ...current.warehouse, ...data.warehouse },
+      cloud: { ...current.cloud, ...data.cloud },
+      updated_at: new Date().toISOString(),
+    }
+    return { ...mockStacks[index] }
+  },
+
+  async deleteStack(id: string): Promise<void> {
+    await delay(300)
+    const stack = mockStacks.find(s => s.id === id)
+    if (stack?.is_default) throw new Error('Cannot delete the default stack')
+    if (mockStacks.length <= 1) throw new Error('Cannot delete the last remaining stack')
+    mockStacks = mockStacks.filter(s => s.id !== id)
+  },
+
+  async testStackConnection(_id: string, _data: StackUpdate): Promise<ConnectionTestResult> {
     await delay(1200)
     return { ok: true, message: 'Connected successfully to COMPUTE_WH' }
   },
 
-  async getCloudConfig(): Promise<CloudConfig> {
-    await delay(200)
-    return { ...mockCloud }
+  async testStackCloudConnection(_id: string, _data: StackUpdate): Promise<ConnectionTestResult> {
+    await delay(1000)
+    return { ok: true, message: 'Connected as arn:aws:iam::123456789012:user/svc-canary (account 123456789012)' }
   },
 
-  async updateCloudConfig(data: CloudConfig): Promise<CloudConfig> {
-    await delay(500)
-    mockCloud = { ...data }
-    return { ...mockCloud }
+  async reorderStacks(stackIds: string[]): Promise<StackOut[]> {
+    await delay(300)
+    const byId = new Map(mockStacks.map(s => [s.id, s]))
+    mockStacks = stackIds.map((id, index) => ({ ...byId.get(id)!, sort_order: index }))
+    return mockStacks.map(s => ({ ...s }))
   },
 }

@@ -8,7 +8,8 @@ from sqlalchemy import select
 
 from app.tools.base import BaseTool
 import app.tools.terraform.templates as templates
-from app.models.project import GitHubRepo, SnowflakeCredentials, Project
+from app.models.project import GitHubRepo, Project
+from app.models.stack import Stack, StackStateBackend
 from app.models.user import Account
 from app.services.github_service import GitHubService, GitHubError
 
@@ -32,10 +33,10 @@ class LandingZoneTool(BaseTool):
             "Provision a full landing zone: S3 bucket, Snowflake database, "
             "medallion-arch schemas, and Snowflake storage integration. "
             "Copies Terraform modules into an upload/ directory and generates "
-            "terragrunt configs for dev and prod environments with {name}-db, "
-            "{name}-db-arch, and {name}-lz folders wired together via dependencies. "
-            "Requires data classification, retention policy, data owner, and "
-            "environment details."
+            "terragrunt configs for every stack configured on the account, with "
+            "{name}-db, {name}-db-arch, and {name}-lz folders wired together via "
+            "dependencies. Requires data classification, retention policy, and "
+            "data owner."
         )
 
     @property
@@ -179,18 +180,32 @@ class LandingZoneTool(BaseTool):
                 f"Call POST /api/v1/projects/{project_code}/cicd first."
             )
 
+        stacks_result = await self._db.execute(
+            select(Stack).where(Stack.account_id == self._account_id).order_by(Stack.sort_order)
+        )
+        stacks = list(stacks_result.scalars().all())
+        if not stacks:
+            return "No stacks configured for this account. Add one under Admin → Stacks first."
+
+        state_backend_by_stack: dict[str, StackStateBackend] = {}
+        if repo_record:
+            sb_result = await self._db.execute(
+                select(StackStateBackend).where(StackStateBackend.github_repo_id == repo_record.id)
+            )
+            state_backend_by_stack = {r.stack_id: r for r in sb_result.scalars().all()}
+
         state_configs = {
-            "dev": {
-                "bucket": (repo_record.dev_state_bucket if repo_record else None) or f"{project_code}-dev-terraform-state",
-                "region": (repo_record.dev_state_region if repo_record else None) or region,
-                "lock_table": (repo_record.dev_state_lock_table if repo_record else None) or f"{project_code}-dev-terraform-lock",
-            },
-            "prod": {
-                "bucket": (repo_record.prod_state_bucket if repo_record else None) or f"{project_code}-prod-terraform-state",
-                "region": (repo_record.prod_state_region if repo_record else None) or region,
-                "lock_table": (repo_record.prod_state_lock_table if repo_record else None) or f"{project_code}-prod-terraform-lock",
-            },
+            s.name: {
+                "bucket": (state_backend_by_stack[s.id].state_bucket if s.id in state_backend_by_stack else None)
+                or f"{project_code}-{s.name}-terraform-state",
+                "region": (state_backend_by_stack[s.id].state_region if s.id in state_backend_by_stack else None)
+                or region,
+                "lock_table": (state_backend_by_stack[s.id].state_lock_table if s.id in state_backend_by_stack else None)
+                or f"{project_code}-{s.name}-terraform-lock",
+            }
+            for s in stacks
         }
+        stack_names = [s.name for s in stacks]
 
         if not (repo_record and repo_record.skip_module_import):
             self._copy_modules(upload_root)
@@ -199,7 +214,7 @@ class LandingZoneTool(BaseTool):
 
         schemas_hcl = ", ".join(f'"{s}"' for s in schema_names)
 
-        for env in ("dev", "prod"):
+        for env in stack_names:
             sc = state_configs[env]
             env_top_dir = upload_root / env
             env_dir = env_top_dir / "landing-zone"
@@ -261,8 +276,19 @@ class LandingZoneTool(BaseTool):
             data_classification=data_classification,
             retention_policy=retention_policy,
             schema_names=schema_names,
+            stack_names=stack_names,
             action=_action,
         )
+
+        stack_structure = "\n".join(
+            f"    {stack_name}/landing-zone/\n"
+            f"      {name}-db/\n"
+            f"      {name}-db-arch/\n"
+            f"      {name}-lz/\n"
+            f"      {name}-si/"
+            for stack_name in stack_names
+        )
+        first_stack = stack_names[0]
 
         return (
             f"Landing zone ready at {upload_root}\n\n"
@@ -278,20 +304,11 @@ class LandingZoneTool(BaseTool):
             f"    modules/snowflake/s3-storage-integration/\n"
             f"    terragrunt.hcl        (root config)\n"
             f"    global.hcl\n"
-            f"    dev/landing-zone/\n"
-            f"      {name}-db/         (Snowflake database)\n"
-            f"      {name}-db-arch/    (medallion schemas)\n"
-            f"      {name}-lz/         (S3 bucket)\n"
-            f"      {name}-si/         (Snowflake storage integration + stage)\n"
-            f"    prod/landing-zone/\n"
-            f"      {name}-db/\n"
-            f"      {name}-db-arch/\n"
-            f"      {name}-lz/\n"
-            f"      {name}-si/\n"
+            f"{stack_structure}\n"
             f"{github_section}\n"
-            f"To deploy (dev):\n"
-            f"  terragrunt run-all plan  --terragrunt-working-dir dev/landing-zone\n"
-            f"  terragrunt run-all apply --terragrunt-working-dir dev/landing-zone"
+            f"To deploy ({first_stack}):\n"
+            f"  terragrunt run-all plan  --terragrunt-working-dir {first_stack}/landing-zone\n"
+            f"  terragrunt run-all apply --terragrunt-working-dir {first_stack}/landing-zone"
         )
 
     async def _open_github_pr(
@@ -302,6 +319,7 @@ class LandingZoneTool(BaseTool):
         data_classification: str,
         retention_policy: str,
         schema_names: list[str],
+        stack_names: list[str],
         action: str = "add",
     ) -> str:
         result = await self._db.execute(
@@ -326,7 +344,7 @@ class LandingZoneTool(BaseTool):
             f"- Data classification: {data_classification}\n"
             f"- Retention policy: {retention_policy}\n"
             f"- Schemas: {', '.join(schema_names)}\n"
-            f"- Environments: dev, prod"
+            f"- Stacks: {', '.join(stack_names)}"
         )
 
         pr_title = f"{conv_type}(landing-zone): {action} {landing_zone_name} landing zone"
@@ -345,11 +363,11 @@ class LandingZoneTool(BaseTool):
             f"|---|---|\n"
             f"| Data classification | `{data_classification}` |\n"
             f"| Retention policy | `{retention_policy}` |\n"
-            f"| Environments | `dev`, `prod` |\n\n"
+            f"| Stacks | {', '.join(f'`{s}`' for s in stack_names)} |\n\n"
             f"## Test plan\n\n"
-            f"- [ ] `terragrunt run-all validate` passes in `dev/landing-zone`\n"
+            f"- [ ] `terragrunt run-all validate` passes in `{stack_names[0]}/landing-zone`\n"
             f"- [ ] `terragrunt run-all plan` shows expected resources\n"
-            f"- [ ] Apply to dev before prod\n\n"
+            f"- [ ] Apply to earlier stacks before later ones (`{'` → `'.join(stack_names)}`)\n\n"
             f"---\n"
             f"🤖 Generated by Canary"
         )
@@ -455,15 +473,6 @@ class LandingZoneTool(BaseTool):
             select(GitHubRepo).where(
                 GitHubRepo.account_id == self._account_id,
                 GitHubRepo.project_name == project_name,
-            )
-        )
-        return result.scalar_one_or_none()
-
-    async def _get_snowflake_creds(self, project_name: str) -> "SnowflakeCredentials | None":
-        result = await self._db.execute(
-            select(SnowflakeCredentials).where(
-                SnowflakeCredentials.account_id == self._account_id,
-                SnowflakeCredentials.project_name == project_name,
             )
         )
         return result.scalar_one_or_none()

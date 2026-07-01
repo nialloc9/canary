@@ -75,18 +75,6 @@ async def connect_repo(
         record.create_cicd = payload.create_cicd
         record.skip_bootstrap = payload.skip_bootstrap
         record.skip_module_import = payload.skip_module_import
-        if payload.dev_state_bucket is not None:
-            record.dev_state_bucket = payload.dev_state_bucket
-        if payload.dev_state_region is not None:
-            record.dev_state_region = payload.dev_state_region
-        if payload.dev_state_lock_table is not None:
-            record.dev_state_lock_table = payload.dev_state_lock_table
-        if payload.prod_state_bucket is not None:
-            record.prod_state_bucket = payload.prod_state_bucket
-        if payload.prod_state_region is not None:
-            record.prod_state_region = payload.prod_state_region
-        if payload.prod_state_lock_table is not None:
-            record.prod_state_lock_table = payload.prod_state_lock_table
     else:
         record = GitHubRepo(
             account_id=account_id,
@@ -100,18 +88,12 @@ async def connect_repo(
             create_cicd=payload.create_cicd,
             skip_bootstrap=payload.skip_bootstrap,
             skip_module_import=payload.skip_module_import,
-            dev_state_bucket=payload.dev_state_bucket,
-            dev_state_region=payload.dev_state_region,
-            dev_state_lock_table=payload.dev_state_lock_table,
-            prod_state_bucket=payload.prod_state_bucket,
-            prod_state_region=payload.prod_state_region,
-            prod_state_lock_table=payload.prod_state_lock_table,
         )
         db.add(record)
 
     await db.flush()
 
-    bootstrapped = payload.skip_bootstrap or bool(payload.dev_state_bucket and payload.prod_state_bucket)
+    bootstrapped = payload.skip_bootstrap
 
     proj_result = await db.execute(
         select(Project).where(

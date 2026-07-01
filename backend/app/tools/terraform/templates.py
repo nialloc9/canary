@@ -73,164 +73,166 @@ def account_hcl() -> str:
 '''
 
 
-def ci_workflow(
-    snowflake_org: str,
-    snowflake_account: str,
-    snowflake_user: str,
-    state_region: str,
-    infrastructure_base_path: str,
-) -> str:
+def _secret_suffix(stack_name: str) -> str:
+    return stack_name.upper().replace("-", "_")
+
+
+def ci_workflow(stacks: list[dict], infrastructure_base_path: str) -> str:
+    """Generate the canary-infrastructure-deploy workflow.
+
+    Each stack gets its own plan/apply job pair, scoped to its own
+    subtree and its own suffixed Snowflake secrets — a stack's Snowflake
+    identity can be a genuinely different Snowflake account, so a single
+    shared job (as used when there was only ever "dev"/"prod") can't
+    express this; the Snowflake provider reads identity purely from env
+    vars, not from Terragrunt inputs.
+    """
+    secrets_doc = "\n".join(
+        f"#   SNOWFLAKE_ORGANIZATION_NAME__{_secret_suffix(s['name'])} = {s['sf_organization_name']}\n"
+        f"#   SNOWFLAKE_ACCOUNT_NAME__{_secret_suffix(s['name'])}      = {s['sf_account_name']}\n"
+        f"#   SNOWFLAKE_USER__{_secret_suffix(s['name'])}              = {s['sf_user']}\n"
+        f"#   SNOWFLAKE_PRIVATE_KEY_B64__{_secret_suffix(s['name'])}   = <base64-encoded PEM private key>\n"
+        f"#   AWS_ACCESS_KEY_ID__{_secret_suffix(s['name'])}           = <AWS access key>\n"
+        f"#   AWS_SECRET_ACCESS_KEY__{_secret_suffix(s['name'])}       = <AWS secret key>"
+        for s in stacks
+    )
+
+    def _job(stack: dict, action: str, condition: str) -> str:
+        suffix = _secret_suffix(stack["name"])
+        title = action.capitalize()
+        return f'''  {action}-{stack["name"]}:
+    name: Terragrunt {title} ({stack["name"]})
+    runs-on: ubuntu-latest
+    if: {condition}
+    env:
+      SNOWFLAKE_ORGANIZATION_NAME: ${{{{ secrets.SNOWFLAKE_ORGANIZATION_NAME__{suffix} }}}}
+      SNOWFLAKE_ACCOUNT_NAME: ${{{{ secrets.SNOWFLAKE_ACCOUNT_NAME__{suffix} }}}}
+      SNOWFLAKE_USER: ${{{{ secrets.SNOWFLAKE_USER__{suffix} }}}}
+      SNOWFLAKE_AUTHENTICATOR: jwt
+      AWS_ACCESS_KEY_ID: ${{{{ secrets.AWS_ACCESS_KEY_ID__{suffix} }}}}
+      AWS_SECRET_ACCESS_KEY: ${{{{ secrets.AWS_SECRET_ACCESS_KEY__{suffix} }}}}
+      AWS_DEFAULT_REGION: {stack["region"]}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Decode Snowflake private key
+        run: |
+          echo "${{{{ secrets.SNOWFLAKE_PRIVATE_KEY_B64__{suffix} }}}}" | base64 -d > /tmp/sf_key.pem
+          echo "SNOWFLAKE_PRIVATE_KEY=$(cat /tmp/sf_key.pem)" >> $GITHUB_ENV
+
+      - uses: autero1/action-terragrunt@v3
+        with:
+          terragrunt_version: latest
+
+      - name: {title}
+        working-directory: {infrastructure_base_path}/{stack["name"]}
+        run: terragrunt run-all {action} --terragrunt-non-interactive
+'''
+
+    branches = sorted({s["branch"] for s in stacks})
+    branches_yaml = ", ".join(branches)
+
+    plan_jobs = "\n".join(
+        _job(s, "plan", f"github.event_name == 'pull_request' && github.base_ref == '{s['branch']}'")
+        for s in stacks
+    )
+    apply_jobs = "\n".join(
+        _job(s, "apply", f"github.event_name == 'push' && github.ref == 'refs/heads/{s['branch']}'")
+        for s in stacks
+    )
+
     return f'''name: canary-infrastructure-deploy
 
 on:
   pull_request:
-    branches: [develop]
+    branches: [{branches_yaml}]
     paths:
       - "{infrastructure_base_path}/**"
   push:
-    branches: [develop]
+    branches: [{branches_yaml}]
     paths:
       - "{infrastructure_base_path}/**"
 
-env:
-  SNOWFLAKE_ORGANIZATION_NAME: ${{{{ secrets.SNOWFLAKE_ORGANIZATION_NAME }}}}
-  SNOWFLAKE_ACCOUNT_NAME: ${{{{ secrets.SNOWFLAKE_ACCOUNT_NAME }}}}
-  SNOWFLAKE_USER: ${{{{ secrets.SNOWFLAKE_USER }}}}
-  SNOWFLAKE_AUTHENTICATOR: jwt
-  AWS_ACCESS_KEY_ID: ${{{{ secrets.AWS_ACCESS_KEY_ID }}}}
-  AWS_SECRET_ACCESS_KEY: ${{{{ secrets.AWS_SECRET_ACCESS_KEY }}}}
-  AWS_DEFAULT_REGION: {state_region}
-
-# Required GitHub secrets:
-#   SNOWFLAKE_ORGANIZATION_NAME = {snowflake_org}
-#   SNOWFLAKE_ACCOUNT_NAME      = {snowflake_account}
-#   SNOWFLAKE_USER              = {snowflake_user}
-#   SNOWFLAKE_PRIVATE_KEY_B64   = <base64-encoded PEM private key>
-#   AWS_ACCESS_KEY_ID           = <AWS access key>
-#   AWS_SECRET_ACCESS_KEY       = <AWS secret key>
+# Required GitHub secrets (one set per stack):
+{secrets_doc}
 
 jobs:
-  plan:
-    name: Terragrunt Plan
+{plan_jobs}
+{apply_jobs}'''
+
+
+def bootstrap_workflow(stacks: list[dict]) -> str:
+    """Generate the canary-bootstrap workflow.
+
+    ``stacks`` must already be ordered by promotion order (i.e. account
+    sort_order). Plan jobs run independently in parallel; apply jobs are
+    chained so each stack only applies once the previous one has
+    succeeded — this generalizes the old fixed `apply-prod needs
+    [apply-dev]` dependency into an N-length chain.
+    """
+
+    def _plan_job(stack: dict) -> str:
+        suffix = _secret_suffix(stack["name"])
+        return f'''  plan-{stack["name"]}:
+    name: Terraform Plan ({stack["name"]})
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && github.base_ref == '{stack["branch"]}'
+    env:
+      AWS_ACCESS_KEY_ID: ${{{{ secrets.AWS_ACCESS_KEY_ID__{suffix} }}}}
+      AWS_SECRET_ACCESS_KEY: ${{{{ secrets.AWS_SECRET_ACCESS_KEY__{suffix} }}}}
+      AWS_DEFAULT_REGION: {stack["region"]}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Decode Snowflake private key
-        run: |
-          echo "${{{{ secrets.SNOWFLAKE_PRIVATE_KEY_B64 }}}}" | base64 -d > /tmp/sf_key.pem
-          echo "SNOWFLAKE_PRIVATE_KEY=$(cat /tmp/sf_key.pem)" >> $GITHUB_ENV
-
-      - uses: autero1/action-terragrunt@v3
-        with:
-          terragrunt_version: latest
-
+      - uses: hashicorp/setup-terraform@v3
       - name: Plan
-        working-directory: {infrastructure_base_path}
-        run: terragrunt run-all plan --terragrunt-non-interactive
-
-  apply:
-    name: Terragrunt Apply
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Decode Snowflake private key
+        working-directory: bootstrap/{stack["name"]}
         run: |
-          echo "${{{{ secrets.SNOWFLAKE_PRIVATE_KEY_B64 }}}}" | base64 -d > /tmp/sf_key.pem
-          echo "SNOWFLAKE_PRIVATE_KEY=$(cat /tmp/sf_key.pem)" >> $GITHUB_ENV
-
-      - uses: autero1/action-terragrunt@v3
-        with:
-          terragrunt_version: latest
-
-      - name: Apply
-        working-directory: {infrastructure_base_path}
-        run: terragrunt run-all apply --terragrunt-non-interactive
+          terraform init
+          terraform plan
 '''
 
+    def _apply_job(stack: dict, previous: dict | None) -> str:
+        suffix = _secret_suffix(stack["name"])
+        needs = f'\n    needs: [apply-{previous["name"]}]' if previous else ""
+        return f'''  apply-{stack["name"]}:
+    name: Terraform Apply ({stack["name"]})
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/{stack["branch"]}'{needs}
+    env:
+      AWS_ACCESS_KEY_ID: ${{{{ secrets.AWS_ACCESS_KEY_ID__{suffix} }}}}
+      AWS_SECRET_ACCESS_KEY: ${{{{ secrets.AWS_SECRET_ACCESS_KEY__{suffix} }}}}
+      AWS_DEFAULT_REGION: {stack["region"]}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+      - name: Apply
+        working-directory: bootstrap/{stack["name"]}
+        run: |
+          terraform init
+          terraform apply -auto-approve
+'''
 
-def bootstrap_workflow(dev_state_region: str, prod_state_region: str) -> str:
+    branches_yaml = ", ".join(sorted({s["branch"] for s in stacks}))
+    plan_jobs = "\n".join(_plan_job(s) for s in stacks)
+    apply_jobs = "\n".join(
+        _apply_job(s, stacks[i - 1] if i > 0 else None) for i, s in enumerate(stacks)
+    )
+
     return f'''name: canary-bootstrap
 
 on:
   pull_request:
-    branches: [develop]
+    branches: [{branches_yaml}]
     paths:
       - "bootstrap/**"
   push:
-    branches: [develop]
+    branches: [{branches_yaml}]
     paths:
       - "bootstrap/**"
 
-env:
-  AWS_ACCESS_KEY_ID: ${{{{ secrets.AWS_ACCESS_KEY_ID }}}}
-  AWS_SECRET_ACCESS_KEY: ${{{{ secrets.AWS_SECRET_ACCESS_KEY }}}}
-
 jobs:
-  plan-dev:
-    name: Terraform Plan (dev)
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    env:
-      AWS_DEFAULT_REGION: {dev_state_region}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
-      - name: Plan
-        working-directory: bootstrap/dev
-        run: |
-          terraform init
-          terraform plan
-
-  plan-prod:
-    name: Terraform Plan (prod)
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    env:
-      AWS_DEFAULT_REGION: {prod_state_region}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
-      - name: Plan
-        working-directory: bootstrap/prod
-        run: |
-          terraform init
-          terraform plan
-
-  apply-dev:
-    name: Terraform Apply (dev)
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
-    env:
-      AWS_DEFAULT_REGION: {dev_state_region}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
-      - name: Apply
-        working-directory: bootstrap/dev
-        run: |
-          terraform init
-          terraform apply -auto-approve
-
-  apply-prod:
-    name: Terraform Apply (prod)
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
-    needs: [apply-dev]
-    env:
-      AWS_DEFAULT_REGION: {prod_state_region}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
-      - name: Apply
-        working-directory: bootstrap/prod
-        run: |
-          terraform init
-          terraform apply -auto-approve
-'''
+{plan_jobs}
+{apply_jobs}'''
 
 
 def global_hcl(name: str, extra_tags_hcl: str) -> str:

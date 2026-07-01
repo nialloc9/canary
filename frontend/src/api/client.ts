@@ -34,29 +34,57 @@ export interface OrgSettings {
   domain: string
 }
 
-export type WarehouseType = 'snowflake'
-export type WarehouseAuthMethod = 'SNOWFLAKE' | 'SNOWFLAKE_JWT'
+export type WarehouseType = 'snowflake' | 'databricks'
+export type CloudProvider = 'aws' | 'azure'
 
-export interface WarehouseConfig {
+export interface WarehouseOut {
   type: WarehouseType
-  account: string
-  username: string
-  authenticator: WarehouseAuthMethod
-  password?: string | null
-  privateKeyB64?: string | null
-  database?: string
-  schema?: string
-  warehouse?: string
-  role?: string
+  organization_name: string
+  account_name: string
+  user: string
+  authenticator: string
+  private_key_b64?: string | null
+  database?: string | null
+  schema_?: string | null
+  warehouse?: string | null
+  role?: string | null
 }
 
-export type CloudProvider = 'aws'
+export type WarehouseUpdate = Partial<WarehouseOut>
 
-export interface CloudConfig {
+export interface CloudOut {
   provider: CloudProvider
-  accessKeyId: string
-  secretAccessKey?: string
+  access_key_id: string
+  secret_access_key?: string | null
   region: string
+}
+
+export type CloudUpdate = Partial<CloudOut>
+
+export interface StackOut {
+  id: string
+  name: string
+  branch: string
+  sort_order: number
+  is_default: boolean
+  warehouse: WarehouseOut
+  cloud: CloudOut
+  created_at: string
+  updated_at: string
+}
+
+export interface StackCreate {
+  name: string
+  branch?: string
+  warehouse?: WarehouseUpdate
+  cloud?: CloudUpdate
+}
+
+export interface StackUpdate {
+  name?: string
+  branch?: string
+  warehouse?: WarehouseUpdate
+  cloud?: CloudUpdate
 }
 
 export interface ConnectionTestResult {
@@ -69,7 +97,6 @@ export interface ProjectOut {
   name: string
   version_control_created: boolean
   cicd_created: boolean
-  warehouse_created: boolean
   infrastructure_bootstrapped: boolean
   created_at: string
 }
@@ -85,12 +112,6 @@ export interface GitHubRepoOut {
   create_cicd: boolean
   skip_bootstrap: boolean
   skip_module_import: boolean
-  dev_state_bucket: string | null
-  dev_state_region: string | null
-  dev_state_lock_table: string | null
-  prod_state_bucket: string | null
-  prod_state_region: string | null
-  prod_state_lock_table: string | null
   created_at: string
   updated_at: string
 }
@@ -106,12 +127,24 @@ export interface GitHubRepoConnect {
   create_cicd: boolean
   skip_bootstrap: boolean
   skip_module_import: boolean
-  dev_state_bucket?: string
-  dev_state_region?: string
-  dev_state_lock_table?: string
-  prod_state_bucket?: string
-  prod_state_region?: string
-  prod_state_lock_table?: string
+}
+
+export interface StackStateOverride {
+  bucket?: string | null
+  region?: string | null
+  lock_table?: string | null
+}
+
+export interface StackStateOut {
+  name: string
+  bucket: string
+  region: string
+  lock_table: string
+}
+
+export interface ProjectBootstrapResponse {
+  pr_url: string
+  stacks: StackStateOut[]
 }
 
 // ── HTTP helper ───────────────────────────────────────────────────────────────
@@ -213,29 +246,39 @@ export const api = {
     return request('/org/settings', { method: 'PUT', body: JSON.stringify(data) })
   },
 
-  getWarehouseConfig(): Promise<WarehouseConfig> {
-    if (config.mockApi) return mockApi.getWarehouseConfig()
-    return request('/org/warehouse')
+  listStacks(): Promise<StackOut[]> {
+    if (config.mockApi) return mockApi.listStacks()
+    return request('/stacks')
   },
 
-  updateWarehouseConfig(data: WarehouseConfig): Promise<WarehouseConfig> {
-    if (config.mockApi) return mockApi.updateWarehouseConfig(data)
-    return request('/org/warehouse', { method: 'PUT', body: JSON.stringify(data) })
+  createStack(data: StackCreate): Promise<StackOut> {
+    if (config.mockApi) return mockApi.createStack(data)
+    return request('/stacks', { method: 'POST', body: JSON.stringify(data) })
   },
 
-  testWarehouseConnection(data: WarehouseConfig): Promise<ConnectionTestResult> {
-    if (config.mockApi) return mockApi.testWarehouseConnection(data)
-    return request('/org/warehouse/test', { method: 'POST', body: JSON.stringify(data) })
+  updateStack(id: string, data: StackUpdate): Promise<StackOut> {
+    if (config.mockApi) return mockApi.updateStack(id, data)
+    return request(`/stacks/${id}`, { method: 'PUT', body: JSON.stringify(data) })
   },
 
-  getCloudConfig(): Promise<CloudConfig> {
-    if (config.mockApi) return mockApi.getCloudConfig()
-    return request('/org/cloud')
+  deleteStack(id: string): Promise<void> {
+    if (config.mockApi) return mockApi.deleteStack(id)
+    return request(`/stacks/${id}`, { method: 'DELETE' })
   },
 
-  updateCloudConfig(data: CloudConfig): Promise<CloudConfig> {
-    if (config.mockApi) return mockApi.updateCloudConfig(data)
-    return request('/org/cloud', { method: 'PUT', body: JSON.stringify(data) })
+  testStackConnection(id: string, data: StackUpdate): Promise<ConnectionTestResult> {
+    if (config.mockApi) return mockApi.testStackConnection(id, data)
+    return request(`/stacks/${id}/test`, { method: 'POST', body: JSON.stringify(data) })
+  },
+
+  testStackCloudConnection(id: string, data: StackUpdate): Promise<ConnectionTestResult> {
+    if (config.mockApi) return mockApi.testStackCloudConnection(id, data)
+    return request(`/stacks/${id}/test-cloud`, { method: 'POST', body: JSON.stringify(data) })
+  },
+
+  reorderStacks(stackIds: string[]): Promise<StackOut[]> {
+    if (config.mockApi) return mockApi.reorderStacks(stackIds)
+    return request('/stacks/reorder', { method: 'PUT', body: JSON.stringify({ stack_ids: stackIds }) })
   },
 
   listProjects(): Promise<ProjectOut[]> {

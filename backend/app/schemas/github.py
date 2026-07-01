@@ -13,12 +13,6 @@ class GitHubRepoConnect(BaseModel):
     create_cicd: bool = True
     skip_bootstrap: bool = False
     skip_module_import: bool = False
-    dev_state_bucket: str | None = None
-    dev_state_region: str | None = None
-    dev_state_lock_table: str | None = None
-    prod_state_bucket: str | None = None
-    prod_state_region: str | None = None
-    prod_state_lock_table: str | None = None
 
     @field_validator("repo_full_name")
     @classmethod
@@ -44,12 +38,6 @@ class GitHubRepoOut(BaseModel):
     create_cicd: bool
     skip_bootstrap: bool
     skip_module_import: bool
-    dev_state_bucket: str | None
-    dev_state_region: str | None
-    dev_state_lock_table: str | None
-    prod_state_bucket: str | None
-    prod_state_region: str | None
-    prod_state_lock_table: str | None
     created_at: datetime
     updated_at: datetime
 

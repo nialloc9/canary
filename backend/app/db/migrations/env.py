@@ -9,7 +9,8 @@ from app.core.config import get_settings
 from app.core.database import Base
 # Import models so Alembic detects them
 import app.models.conversation  # noqa
-import app.models.project  # noqa  # also registers CiCd, GitHubRepo, SnowflakeCredentials
+import app.models.project  # noqa  # also registers CiCd, GitHubRepo
+import app.models.stack  # noqa  # also registers StackStateBackend
 import app.models.user  # noqa  # also registers Account
 
 settings = get_settings()

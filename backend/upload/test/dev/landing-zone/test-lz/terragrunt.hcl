@@ -11,7 +11,7 @@ inputs = {
   env          = "dev"
   project_name = "aura"
 
-  create_access_keys = true
+  create_access_keys = false
 
   transition_to_ia_days      = 0
   transition_to_glacier_days = 0

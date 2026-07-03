@@ -121,18 +121,15 @@ resource "aws_iam_access_key" "s3" {
   user  = aws_iam_user.s3[0].name
 }
 
-resource "aws_secretsmanager_secret" "access_keys" {
-  count = var.create_access_keys ? 1 : 0
-  name  = "${var.project_name}/${var.env}/${var.name}-s3-access-keys"
-  tags  = local.tags
-}
+module "access_keys_secret" {
+  count  = var.create_access_keys ? 1 : 0
+  source = "../secret"
 
-resource "aws_secretsmanager_secret_version" "access_keys" {
-  count     = var.create_access_keys ? 1 : 0
-  secret_id = aws_secretsmanager_secret.access_keys[0].id
+  name = "${var.project_name}/${var.env}/${var.name}-s3-access-keys"
   secret_string = jsonencode({
     access_key_id     = aws_iam_access_key.s3[0].id
     secret_access_key = aws_iam_access_key.s3[0].secret
   })
+  tags = local.tags
 }
 

@@ -8,5 +8,5 @@ terraform {
 
 inputs = {
   name    = "foxglove"
-  comment = "Prod database for foxglove."
+  comment = "Dev database for foxglove."
 }

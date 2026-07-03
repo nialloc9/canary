@@ -7,9 +7,9 @@ terraform {
 }
 
 inputs = {
-  name = "foxglove"
-  env  = "prod"
-  existing_s3_bucket_arn = "arn:aws:s3:::linq-customer-cold-confidential-hw-foxglove-1-atmta068"
+  name         = "foxglove"
+  env          = "dev"
+  project_name = "aura"
 
   create_access_keys = false
 

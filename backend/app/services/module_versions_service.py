@@ -10,7 +10,6 @@ MODULES_ROOT = Path(__file__).resolve().parents[2] / "terraform" / "modules"
 # terraform/modules/<version>/.
 MODULE_COMPONENTS = (
     "aws/landing-zone",
-    "aws/secret",
     "snowflake/database",
     "snowflake/medallion-arch",
     "snowflake/s3-storage-integration",

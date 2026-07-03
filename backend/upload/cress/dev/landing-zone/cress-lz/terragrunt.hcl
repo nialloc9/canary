@@ -7,8 +7,9 @@ terraform {
 }
 
 inputs = {
-  name = "cress"
-  env  = "dev"
+  name         = "cress"
+  env          = "dev"
+  project_name = "aura"
 
   create_access_keys = false
 

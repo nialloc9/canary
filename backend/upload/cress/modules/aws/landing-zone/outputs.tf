@@ -15,10 +15,10 @@ output "s3_bucket_arn" {
 
 output "access_keys_secret_arn" {
   description = "ARN of the Secrets Manager secret containing the S3 access keys."
-  value       = var.create_access_keys ? aws_secretsmanager_secret.access_keys[0].arn : null
+  value       = var.create_access_keys ? module.access_keys_secret[0].arn : null
 }
 
 output "access_keys_secret_name" {
   description = "Name/path of the Secrets Manager secret containing the S3 access keys."
-  value       = var.create_access_keys ? aws_secretsmanager_secret.access_keys[0].name : null
+  value       = var.create_access_keys ? module.access_keys_secret[0].name : null
 }

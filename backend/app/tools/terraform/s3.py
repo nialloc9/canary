@@ -331,7 +331,6 @@ class LandingZoneTool(BaseTool):
             f"  upload/{name}/\n"
             f"    modules/ (version {stacks[0].module_version})\n"
             f"      aws/landing-zone/\n"
-            f"      aws/secret/\n"
             f"      snowflake/database/\n"
             f"      snowflake/medallion-arch/\n"
             f"      snowflake/s3-storage-integration/\n"

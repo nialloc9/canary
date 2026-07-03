@@ -1,9 +1,9 @@
 import { createContext, useContext, useState, useCallback, ReactNode } from 'react'
-import { api, TokenResponse } from '../api/client'
+import { api, TokenResponse, storeTokens, clearTokens, hasStoredSession, getStoredRefreshToken } from '../api/client'
 
 interface AuthState {
   isAuthenticated: boolean
-  login: (username: string, password: string) => Promise<void>
+  login: (username: string, password: string, rememberMe?: boolean) => Promise<void>
   register: (payload: {
     account_name: string
     account_domain: string
@@ -17,14 +17,11 @@ interface AuthState {
 const AuthContext = createContext<AuthState | null>(null)
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [isAuthenticated, setIsAuthenticated] = useState(() =>
-    !!localStorage.getItem('access_token')
-  )
+  const [isAuthenticated, setIsAuthenticated] = useState(() => hasStoredSession())
 
-  const login = useCallback(async (username: string, password: string) => {
+  const login = useCallback(async (username: string, password: string, rememberMe = false) => {
     const tokens: TokenResponse = await api.auth.login(username, password)
-    localStorage.setItem('access_token', tokens.access_token)
-    localStorage.setItem('refresh_token', tokens.refresh_token)
+    storeTokens(tokens, rememberMe)
     setIsAuthenticated(true)
   }, [])
 
@@ -43,7 +40,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   )
 
   const logout = useCallback(async () => {
-    const refreshToken = localStorage.getItem('refresh_token')
+    const refreshToken = getStoredRefreshToken()
     if (refreshToken) {
       try {
         await api.auth.logout(refreshToken)
@@ -51,8 +48,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         // best-effort
       }
     }
-    localStorage.removeItem('access_token')
-    localStorage.removeItem('refresh_token')
+    clearTokens()
     setIsAuthenticated(false)
   }, [])
 

@@ -11,7 +11,8 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await db.create_all()
+    # Schema is managed by Alembic migrations (run before the process starts —
+    # see the Dockerfile CMD), not by create_all().
     yield
     await db.dispose()
 

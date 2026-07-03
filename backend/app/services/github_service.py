@@ -99,6 +99,51 @@ class GitHubService:
                 "html_url": data["html_url"],
             }
 
+    async def branch_exists(self, branch: str) -> bool:
+        async with httpx.AsyncClient(headers=self._headers, timeout=30.0) as client:
+            resp = await client.get(self._repo_url(f"/git/ref/heads/{branch}"))
+            return resp.status_code == 200
+
+    async def create_branch_from(self, new_branch: str, source_branch: str) -> None:
+        """Create `new_branch` at the current tip of `source_branch`. Raises
+        GitHubError if `source_branch` doesn't exist or creation otherwise fails."""
+        async with httpx.AsyncClient(headers=self._headers, timeout=30.0) as client:
+            ref_resp = await client.get(self._repo_url(f"/git/ref/heads/{source_branch}"))
+            self._raise_for(ref_resp, f"Failed to find source branch '{source_branch}'")
+            sha = ref_resp.json()["object"]["sha"]
+
+            create_resp = await client.post(
+                self._repo_url("/git/refs"),
+                json={"ref": f"refs/heads/{new_branch}", "sha": sha},
+            )
+            if create_resp.status_code == 422:
+                return  # branch already exists (created concurrently) — fine
+            self._raise_for(create_resp, f"Failed to create branch '{new_branch}'")
+
+    async def list_directory(self, path: str, ref: str | None = None) -> list[dict]:
+        """List entries in a repo directory at `ref` (defaults to self._branch).
+        Returns [] if the path doesn't exist rather than raising."""
+        async with httpx.AsyncClient(headers=self._headers, timeout=30.0) as client:
+            resp = await client.get(self._repo_url(f"/contents/{path}"), params={"ref": ref or self._branch})
+            if resp.status_code == 404:
+                return []
+            self._raise_for(resp, f"Failed to list directory '{path}'")
+            data = resp.json()
+            return data if isinstance(data, list) else []
+
+    async def get_file_content(self, path: str, ref: str | None = None) -> str | None:
+        """Fetch a file's decoded text content at `ref` (defaults to self._branch).
+        Returns None if it doesn't exist rather than raising."""
+        async with httpx.AsyncClient(headers=self._headers, timeout=30.0) as client:
+            resp = await client.get(self._repo_url(f"/contents/{path}"), params={"ref": ref or self._branch})
+            if resp.status_code == 404:
+                return None
+            self._raise_for(resp, f"Failed to fetch file '{path}'")
+            data = resp.json()
+            if data.get("encoding") == "base64":
+                return base64.b64decode(data["content"]).decode("utf-8", errors="replace")
+            return data.get("content", "")
+
     async def set_secrets(self, secrets: dict[str, str]) -> None:
         """Encrypt and upload a dict of secrets to the repo via the Actions Secrets API."""
         async with httpx.AsyncClient(headers=self._headers, timeout=30.0) as client:
@@ -119,6 +164,44 @@ class GitHubService:
                 )
                 self._raise_for(resp, f"Failed to set secret '{name}'")
 
+    async def open_branch_pr(self, head: str, base: str, title: str, body: str) -> str:
+        """Open a PR between two already-pushed branches (no file changes needed —
+        used by the release flow, where the git merge already happened locally).
+        Returns the PR HTML URL."""
+        async with httpx.AsyncClient(headers=self._headers, timeout=30.0) as client:
+            resp = await client.post(
+                self._repo_url("/pulls"),
+                json={"title": title, "body": body, "head": head, "base": base},
+            )
+            if resp.status_code == 422:
+                existing = await client.get(
+                    self._repo_url("/pulls"),
+                    params={"head": f"{self._repo.split('/')[0]}:{head}", "base": base, "state": "open"},
+                )
+                self._raise_for(existing, "Failed to fetch existing pull request")
+                pulls = existing.json()
+                if pulls:
+                    return pulls[0]["html_url"]
+                raise GitHubError(f"PR from '{head}' to '{base}' already exists but could not be retrieved")
+            self._raise_for(resp, f"Failed to create pull request '{head}' → '{base}'")
+            return resp.json()["html_url"]
+
+    async def find_open_pr_by_branch_substring(self, substring: str) -> str | None:
+        """Search open PRs targeting self._branch for one whose head branch name
+        contains `substring`. Returns the PR's HTML URL, or None if none match.
+        Used to give a precise "merge this PR first" hint instead of a generic
+        "couldn't find it" error when content genuinely just hasn't landed yet."""
+        async with httpx.AsyncClient(headers=self._headers, timeout=30.0) as client:
+            resp = await client.get(
+                self._repo_url("/pulls"),
+                params={"base": self._branch, "state": "open", "per_page": 100},
+            )
+            self._raise_for(resp, "Failed to list open pull requests")
+            for pr in resp.json():
+                if substring in pr.get("head", {}).get("ref", ""):
+                    return pr["html_url"]
+            return None
+
     async def merge_pull_request(self, pr_number: int, commit_message: str = "") -> None:
         """Merge an open pull request via squash merge."""
         async with httpx.AsyncClient(headers=self._headers, timeout=30.0) as client:
@@ -136,12 +219,14 @@ class GitHubService:
         pr_title: str,
         pr_body: str,
         root_files: dict[str, bytes] | None = None,
-    ) -> tuple[str, int]:
+    ) -> tuple[str | None, int]:
         """
         Create a feature branch from self._branch, commit all files from local_dir
         (prefixed with infrastructure_base_path) plus any root_files (committed at
         the repo root with no prefix) in a single atomic commit, then open a PR.
-        Returns (pr_html_url, file_count).
+        Returns (pr_html_url, file_count). If none of the files actually differ
+        from what's already on self._branch, no branch/commit/PR is created and
+        pr_html_url is None.
         """
         files: dict[str, bytes] = {
             self._repo_path(path.relative_to(local_dir)): path.read_bytes()
@@ -155,8 +240,11 @@ class GitHubService:
 
         async with httpx.AsyncClient(headers=self._headers, timeout=30.0) as client:
             base_commit_sha, base_tree_sha = await self._get_branch_state(client)
-            await self._create_branch(client, feature_branch, base_commit_sha)
             tree_sha = await self._create_tree(client, files, base_tree_sha)
+            if tree_sha == base_tree_sha:
+                return None, len(files)
+
+            await self._create_branch(client, feature_branch, base_commit_sha)
             _, commit_sha = await self._create_commit(
                 client, commit_message, tree_sha, base_commit_sha
             )

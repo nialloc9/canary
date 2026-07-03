@@ -79,7 +79,7 @@ export function AppLayout({ children, sidebarContent }: AppLayoutProps) {
               key={item.href}
               to={item.href}
               className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-xs transition-colors ${
-                pathname === item.href
+                pathname === item.href || (item.href === '/' && pathname.startsWith('/chat/'))
                   ? 'bg-sidebar-accent text-sidebar-accent-foreground font-medium'
                   : 'text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground'
               }`}

@@ -1,9 +1,13 @@
+from dataclasses import asdict
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
 from app.api.deps import get_current_account_id
 from app.core.database import get_db
+from app.models.project import GitHubRepo, Project
 from app.models.stack import Stack, StackStateBackend
 from app.schemas.stack import (
     StackCreate,
@@ -15,11 +19,30 @@ from app.schemas.stack import (
     CloudOut,
     ReorderRequest,
     ConnectionTestResult,
+    ReleaseRequest,
+    ReleaseResponse,
+    TopologyOut,
+    TopologyNodeOut,
+    TopologyEdgeOut,
+    TopologySkippedOut,
+    AccessKeysOut,
+    ModuleVersionOut,
+    ModuleRefreshResponse,
 )
+from app.services.branch_lookup import get_dev_prod_branches
+from app.services.github_service import GitHubService, GitHubError
+from app.services.release_service import release_stack, ReleaseError
+from app.services.topology_service import get_stack_topology
+from app.services.aws_secrets_service import get_landing_zone_access_keys
+from app.services.module_versions_service import list_module_versions, latest_module_version, module_version_exists
+from app.services.module_refresh_service import hard_refresh_modules, ModuleRefreshError
 
 router = APIRouter(prefix="/stacks", tags=["stacks"])
 
-DEFAULT_STACK_NAME = "main"
+# "dev" and "prod" are auto-seeded on every account and are load-bearing for the
+# release flow (release_service.py resolves them by name) — they can't be
+# deleted, renamed, or duplicated.
+PROTECTED_STACK_NAMES = {"dev", "prod"}
 
 
 def _stack_out(record: Stack) -> StackOut:
@@ -27,6 +50,9 @@ def _stack_out(record: Stack) -> StackOut:
         id=record.id,
         name=record.name,
         branch=record.branch,
+        verify_before_pr=record.verify_before_pr,
+        verify_max_attempts=record.verify_max_attempts,
+        module_version=record.module_version,
         sort_order=record.sort_order,
         is_default=record.is_default,
         warehouse=WarehouseOut(
@@ -111,16 +137,24 @@ async def list_stacks(
     return [_stack_out(r) for r in result.scalars().all()]
 
 
+@router.get("/module-versions", response_model=list[ModuleVersionOut])
+async def list_stack_module_versions():
+    return [ModuleVersionOut(**v.model_dump()) for v in list_module_versions()]
+
+
 @router.post("", response_model=StackOut, status_code=201)
 async def create_stack(
     payload: StackCreate,
     db: AsyncSession = Depends(get_db),
     account_id: str = Depends(get_current_account_id),
 ):
-    if payload.name == DEFAULT_STACK_NAME:
+    if payload.module_version is not None and not module_version_exists(payload.module_version):
+        raise HTTPException(status_code=422, detail=f"Unknown module version '{payload.module_version}'")
+
+    if payload.name in PROTECTED_STACK_NAMES:
         raise HTTPException(
             status_code=409,
-            detail=f"The name '{DEFAULT_STACK_NAME}' is reserved for the account's default stack",
+            detail=f"The name '{payload.name}' is reserved — every account already has one",
         )
 
     existing = await db.execute(
@@ -128,6 +162,36 @@ async def create_stack(
     )
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="A stack with this name already exists")
+
+    branch = payload.branch or payload.name
+
+    repo_result = await db.execute(select(GitHubRepo).where(GitHubRepo.account_id == account_id))
+    repo = repo_result.scalar_one_or_none()
+    if not repo:
+        raise HTTPException(
+            status_code=409,
+            detail="Connect a GitHub repo before creating a stack (Admin → Projects).",
+        )
+
+    svc = GitHubService(token=repo.token, repo_full_name=repo.repo_full_name, branch=branch, api_url=repo.api_url)
+    try:
+        await svc.validate()
+    except GitHubError as exc:
+        raise HTTPException(status_code=422, detail=f"GitHub connection failed: {exc}")
+
+    if not await svc.branch_exists(branch):
+        dev_branch, prod_branch = await get_dev_prod_branches(account_id, db)
+        # New stacks branch from dev (the integration branch), except when the
+        # new branch *is* the dev branch itself — can't source a branch from
+        # itself, so fall back to prod in that case.
+        source_branch = prod_branch if branch == dev_branch else dev_branch
+        try:
+            await svc.create_branch_from(branch, source_branch)
+        except GitHubError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Could not create branch '{branch}' from '{source_branch}': {exc}",
+            )
 
     result = await db.execute(
         select(func.coalesce(func.max(Stack.sort_order), -1)).where(Stack.account_id == account_id)
@@ -137,7 +201,10 @@ async def create_stack(
     record = Stack(
         account_id=account_id,
         name=payload.name,
-        branch=payload.branch or payload.name,
+        branch=branch,
+        verify_before_pr=payload.verify_before_pr or False,
+        verify_max_attempts=payload.verify_max_attempts or 3,
+        module_version=payload.module_version or latest_module_version(),
         sort_order=next_sort_order,
         is_default=False,
     )
@@ -185,12 +252,17 @@ async def update_stack(
 ):
     record = await _get_stack_or_404(db, account_id, stack_id)
 
+    if payload.module_version is not None and not module_version_exists(payload.module_version):
+        raise HTTPException(status_code=422, detail=f"Unknown module version '{payload.module_version}'")
+
     if payload.name is not None and payload.name != record.name:
-        if payload.name == DEFAULT_STACK_NAME and not record.is_default:
+        if record.name in PROTECTED_STACK_NAMES:
             raise HTTPException(
                 status_code=409,
-                detail=f"The name '{DEFAULT_STACK_NAME}' is reserved for the account's default stack",
+                detail=f"'{record.name}' cannot be renamed — required by the release flow",
             )
+        if payload.name in PROTECTED_STACK_NAMES:
+            raise HTTPException(status_code=409, detail=f"The name '{payload.name}' is reserved")
         existing = await db.execute(
             select(Stack).where(Stack.account_id == account_id, Stack.name == payload.name)
         )
@@ -200,6 +272,15 @@ async def update_stack(
 
     if payload.branch is not None:
         record.branch = payload.branch
+
+    if payload.verify_before_pr is not None:
+        record.verify_before_pr = payload.verify_before_pr
+
+    if payload.verify_max_attempts is not None:
+        record.verify_max_attempts = payload.verify_max_attempts
+
+    if payload.module_version is not None:
+        record.module_version = payload.module_version
 
     _apply_warehouse(record, payload.warehouse)
     _apply_cloud(record, payload.cloud)
@@ -216,8 +297,8 @@ async def delete_stack(
 ):
     record = await _get_stack_or_404(db, account_id, stack_id)
 
-    if record.is_default:
-        raise HTTPException(status_code=409, detail="Cannot delete the default stack")
+    if record.name in PROTECTED_STACK_NAMES:
+        raise HTTPException(status_code=409, detail=f"Cannot delete the '{record.name}' stack")
 
     count_result = await db.execute(
         select(func.count()).select_from(Stack).where(Stack.account_id == account_id)
@@ -349,3 +430,90 @@ async def test_stack_cloud_connection(
         return ConnectionTestResult(ok=False, message=str(exc))
     except Exception as exc:
         return ConnectionTestResult(ok=False, message=str(exc))
+
+
+@router.post("/{stack_id}/release", response_model=ReleaseResponse)
+async def release(
+    stack_id: str,
+    payload: ReleaseRequest,
+    db: AsyncSession = Depends(get_db),
+    account_id: str = Depends(get_current_account_id),
+):
+    record = await _get_stack_or_404(db, account_id, stack_id)
+    try:
+        result = await release_stack(db, account_id, record.name, payload.target)
+    except ReleaseError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return ReleaseResponse(pr_urls=result.pr_urls, branch=result.branch)
+
+
+@router.get("/{stack_id}/topology", response_model=TopologyOut)
+async def get_topology(
+    stack_id: str,
+    refresh: bool = False,
+    db: AsyncSession = Depends(get_db),
+    account_id: str = Depends(get_current_account_id),
+):
+    record = await _get_stack_or_404(db, account_id, stack_id)
+    topology = await get_stack_topology(db, account_id, record, force_refresh=refresh)
+    return TopologyOut(
+        nodes=[TopologyNodeOut(**asdict(n)) for n in topology.nodes],
+        edges=[TopologyEdgeOut(**asdict(e)) for e in topology.edges],
+        fetched_at=datetime.fromtimestamp(topology.fetched_at, tz=timezone.utc),
+        connected=topology.connected,
+        error=topology.error,
+        skipped=[TopologySkippedOut(**asdict(s)) for s in topology.skipped],
+    )
+
+
+@router.get("/{stack_id}/landing-zones/{landing_zone_name}/access-keys", response_model=AccessKeysOut)
+async def get_landing_zone_access_keys_route(
+    stack_id: str,
+    landing_zone_name: str,
+    db: AsyncSession = Depends(get_db),
+    account_id: str = Depends(get_current_account_id),
+):
+    record = await _get_stack_or_404(db, account_id, stack_id)
+    project_result = await db.execute(select(Project).where(Project.account_id == account_id))
+    project = project_result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="No project found for this account.")
+
+    keys = await get_landing_zone_access_keys(record, project.name, landing_zone_name)
+    if keys is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Access keys not available yet — the landing zone's PR needs to be merged and applied first.",
+        )
+    return AccessKeysOut(**keys)
+
+
+@router.post("/{stack_id}/refresh-modules", response_model=ModuleRefreshResponse)
+async def refresh_modules(
+    stack_id: str,
+    db: AsyncSession = Depends(get_db),
+    account_id: str = Depends(get_current_account_id),
+):
+    record = await _get_stack_or_404(db, account_id, stack_id)
+
+    repo_result = await db.execute(select(GitHubRepo).where(GitHubRepo.account_id == account_id))
+    repo = repo_result.scalar_one_or_none()
+    if not repo:
+        raise HTTPException(
+            status_code=409,
+            detail="Connect a GitHub repo before refreshing modules (Admin → Projects).",
+        )
+
+    try:
+        result = await hard_refresh_modules(repo, record)
+    except ModuleRefreshError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    if result.pr_url is None:
+        return ModuleRefreshResponse(pr_url=None, files_removed=0, files_added=0, message="Already up to date")
+
+    return ModuleRefreshResponse(
+        pr_url=result.pr_url,
+        files_removed=result.files_removed,
+        files_added=result.files_added,
+    )

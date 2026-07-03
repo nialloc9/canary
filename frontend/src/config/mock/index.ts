@@ -1,4 +1,23 @@
-import type { ChatResponse, TokenResponse, UserOut, ConversationOut, OrgSettings, StackOut, StackCreate, StackUpdate, ConnectionTestResult } from '../../api/client'
+import type {
+  ChatResponse,
+  TokenResponse,
+  UserOut,
+  ConversationOut,
+  MessageOut,
+  OrgSettings,
+  StackOut,
+  StackCreate,
+  StackUpdate,
+  ConnectionTestResult,
+  ProjectOut,
+  GitHubRepoOut,
+  GitHubRepoConnect,
+  ReleaseResult,
+  Topology,
+  AccessKeys,
+  ModuleVersion,
+  ModuleRefreshResult,
+} from '../../api/client'
 import {
   MOCK_TOKENS,
   MOCK_USER,
@@ -6,18 +25,27 @@ import {
   mockChatReply,
   MOCK_ORG,
   MOCK_STACKS,
+  MOCK_PROJECT,
+  MOCK_REPO,
+  MOCK_TOPOLOGY,
+  MOCK_ACCESS_KEYS,
+  MOCK_MODULE_VERSIONS,
 } from './data'
 
 let mockProfile = { ...MOCK_USER }
 let mockOrg = { ...MOCK_ORG }
 let mockStacks: StackOut[] = MOCK_STACKS.map(s => ({ ...s, warehouse: { ...s.warehouse }, cloud: { ...s.cloud } }))
 let mockStackCounter = mockStacks.length
+let mockConversations: ConversationOut[] = MOCK_CONVERSATIONS.map(c => ({ ...c, messages: [...(c.messages ?? [])] }))
+let mockProject: ProjectOut = { ...MOCK_PROJECT }
+let mockRepo: GitHubRepoOut | null = { ...MOCK_REPO }
 
 function delay(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-let convCounter = MOCK_CONVERSATIONS.length
+let convCounter = mockConversations.length
+let messageCounter = 0
 
 export const mockApi = {
   auth: {
@@ -35,31 +63,73 @@ export const mockApi = {
       await delay(800)
       return { ...MOCK_USER }
     },
+    async refresh(_refresh_token: string): Promise<TokenResponse> {
+      await delay(200)
+      return { ...MOCK_TOKENS }
+    },
     async logout(_refresh_token: string): Promise<void> {
       await delay(200)
     },
   },
 
-  async chat(message: string, conversationId?: string): Promise<ChatResponse> {
+  async chat(message: string, conversationId?: string, stackId?: string): Promise<ChatResponse> {
     await delay(900 + Math.random() * 600)
-    const id = conversationId ?? `conv-${++convCounter}`
+
+    let conv = conversationId ? mockConversations.find(c => c.id === conversationId) : undefined
+    if (!conv) {
+      conv = {
+        id: `conv-${++convCounter}`,
+        title: message.slice(0, 60),
+        stack_id: stackId ?? null,
+        created_at: new Date().toISOString(),
+        messages: [],
+      }
+      mockConversations = [conv, ...mockConversations]
+    } else if (stackId !== undefined && stackId !== conv.stack_id) {
+      conv.stack_id = stackId
+    }
+
+    const reply = mockChatReply(message)
+    const userMsg: MessageOut = { id: `msg-${++messageCounter}`, role: 'user', content: message, created_at: new Date().toISOString() }
+    const assistantMsg: MessageOut = { id: `msg-${++messageCounter}`, role: 'assistant', content: reply, created_at: new Date().toISOString() }
+    conv.messages = [...(conv.messages ?? []), userMsg, assistantMsg]
+
     return {
-      conversation_id: id,
-      reply: mockChatReply(message),
+      conversation_id: conv.id,
+      reply,
       tool_calls: null,
     }
   },
 
   async getConversations(): Promise<ConversationOut[]> {
     await delay(300)
-    return [...MOCK_CONVERSATIONS]
+    return mockConversations.map(c => ({ ...c, messages: undefined }))
   },
 
   async getConversation(id: string): Promise<ConversationOut> {
     await delay(200)
-    const found = MOCK_CONVERSATIONS.find(c => c.id === id)
+    const found = mockConversations.find(c => c.id === id)
     if (!found) throw new Error('Conversation not found')
-    return { ...found }
+    return { ...found, messages: [...(found.messages ?? [])] }
+  },
+
+  async renameConversation(id: string, title: string): Promise<ConversationOut> {
+    await delay(200)
+    const found = mockConversations.find(c => c.id === id)
+    if (!found) throw new Error('Conversation not found')
+    found.title = title.trim() || found.title
+    return { ...found, messages: [...(found.messages ?? [])] }
+  },
+
+  async generateConversationTitle(id: string): Promise<ConversationOut> {
+    await delay(400)
+    const found = mockConversations.find(c => c.id === id)
+    if (!found) throw new Error('Conversation not found')
+    const firstUserMessage = (found.messages ?? []).find(m => m.role === 'user')
+    if (firstUserMessage) {
+      found.title = firstUserMessage.content.slice(0, 40)
+    }
+    return { ...found, messages: [...(found.messages ?? [])] }
   },
 
   async getProfile(): Promise<UserOut> {
@@ -99,6 +169,9 @@ export const mockApi = {
       id: `mock-stack-${++mockStackCounter}`,
       name: data.name,
       branch: data.branch ?? data.name,
+      verify_before_pr: data.verify_before_pr ?? false,
+      verify_max_attempts: data.verify_max_attempts ?? 3,
+      module_version: data.module_version ?? MOCK_MODULE_VERSIONS[MOCK_MODULE_VERSIONS.length - 1].version,
       sort_order: mockStacks.length,
       is_default: false,
       warehouse: {
@@ -135,6 +208,9 @@ export const mockApi = {
       ...current,
       name: data.name ?? current.name,
       branch: data.branch ?? current.branch,
+      verify_before_pr: data.verify_before_pr ?? current.verify_before_pr,
+      verify_max_attempts: data.verify_max_attempts ?? current.verify_max_attempts,
+      module_version: data.module_version ?? current.module_version,
       warehouse: { ...current.warehouse, ...data.warehouse },
       cloud: { ...current.cloud, ...data.cloud },
       updated_at: new Date().toISOString(),
@@ -160,10 +236,77 @@ export const mockApi = {
     return { ok: true, message: 'Connected as arn:aws:iam::123456789012:user/svc-canary (account 123456789012)' }
   },
 
+  async listModuleVersions(): Promise<ModuleVersion[]> {
+    await delay(150)
+    return MOCK_MODULE_VERSIONS.map(v => ({ ...v }))
+  },
+
+  async refreshStackModules(_id: string): Promise<ModuleRefreshResult> {
+    await delay(1500)
+    return { pr_url: null, files_removed: 0, files_added: 0, message: 'Already up to date' }
+  },
+
   async reorderStacks(stackIds: string[]): Promise<StackOut[]> {
     await delay(300)
     const byId = new Map(mockStacks.map(s => [s.id, s]))
     mockStacks = stackIds.map((id, index) => ({ ...byId.get(id)!, sort_order: index }))
     return mockStacks.map(s => ({ ...s }))
+  },
+
+  async releaseStack(id: string, target: 'prod' | 'develop'): Promise<ReleaseResult> {
+    await delay(1500)
+    const stack = mockStacks.find(s => s.id === id)
+    if (!stack) throw new Error('Stack not found')
+    return {
+      pr_urls: [`https://github.com/${mockRepo?.repo_full_name ?? 'canary-demo/data-platform'}/pull/${Math.floor(Math.random() * 900) + 100}`],
+      branch: target === 'prod' ? 'main' : stack.branch,
+    }
+  },
+
+  async getStackTopology(_id: string, _refresh = false): Promise<Topology> {
+    await delay(500)
+    return { ...MOCK_TOPOLOGY, fetched_at: new Date().toISOString() }
+  },
+
+  async getLandingZoneAccessKeys(_stackId: string, _landingZoneName: string): Promise<AccessKeys> {
+    await delay(300)
+    return { ...MOCK_ACCESS_KEYS }
+  },
+
+  async listProjects(): Promise<ProjectOut[]> {
+    await delay(200)
+    return [{ ...mockProject }]
+  },
+
+  async connectRepo(data: GitHubRepoConnect): Promise<GitHubRepoOut> {
+    await delay(700)
+    mockRepo = {
+      id: mockRepo?.id ?? 'mock-repo-1',
+      project_name: mockProject.name,
+      repo_full_name: data.repo_full_name,
+      branch: data.branch || 'develop',
+      api_url: data.api_url || 'https://api.github.com',
+      infrastructure_base_path: data.infrastructure_base_path || 'infrastructure',
+      auto_merge: data.auto_merge ?? false,
+      create_cicd: data.create_cicd ?? true,
+      skip_bootstrap: data.skip_bootstrap ?? false,
+      skip_module_import: data.skip_module_import ?? false,
+      created_at: mockRepo?.created_at ?? new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    }
+    mockProject = { ...mockProject, version_control_created: true }
+    return { ...mockRepo }
+  },
+
+  async getRepo(): Promise<GitHubRepoOut> {
+    await delay(200)
+    if (!mockRepo) throw new Error('No GitHub repo connected for this account')
+    return { ...mockRepo }
+  },
+
+  async disconnectRepo(): Promise<void> {
+    await delay(300)
+    mockRepo = null
+    mockProject = { ...mockProject, version_control_created: false }
   },
 }

@@ -23,10 +23,19 @@ export interface UserOut {
   created_at: string
 }
 
+export interface MessageOut {
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+  created_at: string
+}
+
 export interface ConversationOut {
   id: string
   title: string | null
+  stack_id: string | null
   created_at: string
+  messages?: MessageOut[]
 }
 
 export interface OrgSettings {
@@ -65,6 +74,9 @@ export interface StackOut {
   id: string
   name: string
   branch: string
+  verify_before_pr: boolean
+  verify_max_attempts: number
+  module_version: string
   sort_order: number
   is_default: boolean
   warehouse: WarehouseOut
@@ -76,6 +88,9 @@ export interface StackOut {
 export interface StackCreate {
   name: string
   branch?: string
+  verify_before_pr?: boolean
+  verify_max_attempts?: number
+  module_version?: string
   warehouse?: WarehouseUpdate
   cloud?: CloudUpdate
 }
@@ -83,6 +98,9 @@ export interface StackCreate {
 export interface StackUpdate {
   name?: string
   branch?: string
+  verify_before_pr?: boolean
+  verify_max_attempts?: number
+  module_version?: string
   warehouse?: WarehouseUpdate
   cloud?: CloudUpdate
 }
@@ -90,6 +108,63 @@ export interface StackUpdate {
 export interface ConnectionTestResult {
   ok: boolean
   message: string
+}
+
+export interface ModuleVersion {
+  version: string
+  released_at: string
+  notes: string
+}
+
+export interface ModuleRefreshResult {
+  pr_url: string | null
+  files_removed: number
+  files_added: number
+  message: string | null
+}
+
+export interface ReleaseResult {
+  pr_urls: string[]
+  branch: string | null
+}
+
+export type TopologyNodeType =
+  | 's3_bucket'
+  | 'snowflake_database'
+  | 'medallion_schemas'
+  | 'storage_integration'
+  | 'snowpipe'
+
+export interface TopologyNode {
+  id: string
+  landing_zone: string
+  type: TopologyNodeType
+  label: string
+  fields: Record<string, string>
+}
+
+export interface TopologyEdge {
+  source: string
+  target: string
+}
+
+export interface TopologySkipped {
+  dir: string
+  reason: string
+}
+
+export interface Topology {
+  nodes: TopologyNode[]
+  edges: TopologyEdge[]
+  fetched_at: string
+  connected: boolean
+  error: string | null
+  skipped: TopologySkipped[]
+}
+
+export interface AccessKeys {
+  access_key_id: string
+  secret_access_key: string
 }
 
 export interface ProjectOut {
@@ -117,10 +192,9 @@ export interface GitHubRepoOut {
 }
 
 export interface GitHubRepoConnect {
-  project_name: string
   repo_full_name: string
   branch: string
-  token: string
+  token?: string
   api_url: string
   infrastructure_base_path: string
   auto_merge: boolean
@@ -143,17 +217,100 @@ export interface StackStateOut {
 }
 
 export interface ProjectBootstrapResponse {
-  pr_url: string
+  pr_url: string | null
   stacks: StackStateOut[]
+}
+
+// ── Token storage ─────────────────────────────────────────────────────────────
+//
+// "Remember me" at login picks the storage: localStorage survives browser
+// restarts, sessionStorage clears when the tab/browser closes. Whichever one
+// holds the tokens is also where a refreshed access token gets written back.
+
+const ACCESS_TOKEN_KEY = 'access_token'
+const REFRESH_TOKEN_KEY = 'refresh_token'
+
+function tokenStorage(): Storage {
+  return localStorage.getItem(REFRESH_TOKEN_KEY) ? localStorage : sessionStorage
+}
+
+function getToken(): string | null {
+  return tokenStorage().getItem(ACCESS_TOKEN_KEY)
+}
+
+function getRefreshToken(): string | null {
+  return tokenStorage().getItem(REFRESH_TOKEN_KEY)
+}
+
+export function storeTokens(tokens: TokenResponse, remember: boolean) {
+  const storage = remember ? localStorage : sessionStorage
+  const other = remember ? sessionStorage : localStorage
+  other.removeItem(ACCESS_TOKEN_KEY)
+  other.removeItem(REFRESH_TOKEN_KEY)
+  storage.setItem(ACCESS_TOKEN_KEY, tokens.access_token)
+  storage.setItem(REFRESH_TOKEN_KEY, tokens.refresh_token)
+}
+
+export function clearTokens() {
+  localStorage.removeItem(ACCESS_TOKEN_KEY)
+  localStorage.removeItem(REFRESH_TOKEN_KEY)
+  sessionStorage.removeItem(ACCESS_TOKEN_KEY)
+  sessionStorage.removeItem(REFRESH_TOKEN_KEY)
+}
+
+export function hasStoredSession(): boolean {
+  return !!(localStorage.getItem(ACCESS_TOKEN_KEY) || sessionStorage.getItem(ACCESS_TOKEN_KEY))
+}
+
+export function getStoredRefreshToken(): string | null {
+  return getRefreshToken()
 }
 
 // ── HTTP helper ───────────────────────────────────────────────────────────────
 
-function getToken(): string | null {
-  return localStorage.getItem('access_token')
+// Auth endpoints legitimately return 401 for reasons unrelated to an expired
+// session (bad password, revoked refresh token) — those should surface their
+// own error message, not trigger a redirect.
+const AUTH_ENDPOINTS = ['/auth/login', '/auth/register', '/auth/refresh']
+
+function handleExpiredSession() {
+  clearTokens()
+  if (window.location.pathname !== '/login') {
+    window.location.href = '/login'
+  }
 }
 
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
+let refreshInFlight: Promise<string | null> | null = null
+
+// The access token is short-lived (30 min); the refresh token is long-lived
+// and only dies on explicit logout or revocation. On a 401 we try to silently
+// mint a new access token before giving up, so the user isn't kicked back to
+// the login screen just because their tab was idle for half an hour.
+async function refreshAccessToken(): Promise<string | null> {
+  if (!refreshInFlight) {
+    refreshInFlight = (async () => {
+      const refreshToken = getRefreshToken()
+      if (!refreshToken) return null
+      try {
+        const tokens = config.mockApi
+          ? await mockApi.auth.refresh(refreshToken)
+          : await request<TokenResponse>('/auth/refresh', {
+              method: 'POST',
+              body: JSON.stringify({ refresh_token: refreshToken }),
+            })
+        storeTokens(tokens, tokenStorage() === localStorage)
+        return tokens.access_token
+      } catch {
+        return null
+      }
+    })().finally(() => {
+      refreshInFlight = null
+    })
+  }
+  return refreshInFlight
+}
+
+async function request<T>(path: string, options?: RequestInit, isRetry = false): Promise<T> {
   const token = getToken()
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -162,6 +319,14 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   if (token) headers['Authorization'] = `Bearer ${token}`
 
   const res = await fetch(`${config.apiUrl}${path}`, { ...options, headers })
+  if (res.status === 401 && !AUTH_ENDPOINTS.some(p => path.startsWith(p))) {
+    if (!isRetry) {
+      const newToken = await refreshAccessToken()
+      if (newToken) return request<T>(path, options, true)
+    }
+    handleExpiredSession()
+    throw new Error('Session expired — please log in again')
+  }
   if (!res.ok) {
     const error = await res.text()
     throw new Error(error || `HTTP ${res.status}`)
@@ -194,6 +359,13 @@ export const api = {
         body: JSON.stringify(payload),
       })
     },
+    refresh(refresh_token: string): Promise<TokenResponse> {
+      if (config.mockApi) return mockApi.auth.refresh(refresh_token)
+      return request('/auth/refresh', {
+        method: 'POST',
+        body: JSON.stringify({ refresh_token }),
+      })
+    },
     logout(refresh_token: string): Promise<void> {
       if (config.mockApi) return mockApi.auth.logout(refresh_token)
       return request('/auth/logout', {
@@ -203,11 +375,11 @@ export const api = {
     },
   },
 
-  chat(message: string, conversationId?: string): Promise<ChatResponse> {
-    if (config.mockApi) return mockApi.chat(message, conversationId)
+  chat(message: string, conversationId?: string, stackId?: string): Promise<ChatResponse> {
+    if (config.mockApi) return mockApi.chat(message, conversationId, stackId)
     return request('/chat', {
       method: 'POST',
-      body: JSON.stringify({ message, conversation_id: conversationId ?? null }),
+      body: JSON.stringify({ message, conversation_id: conversationId ?? null, stack_id: stackId ?? null }),
     })
   },
 
@@ -219,6 +391,16 @@ export const api = {
   getConversation(id: string): Promise<ConversationOut> {
     if (config.mockApi) return mockApi.getConversation(id)
     return request(`/chat/conversations/${id}`)
+  },
+
+  renameConversation(id: string, title: string): Promise<ConversationOut> {
+    if (config.mockApi) return mockApi.renameConversation(id, title)
+    return request(`/chat/conversations/${id}`, { method: 'PATCH', body: JSON.stringify({ title }) })
+  },
+
+  generateConversationTitle(id: string): Promise<ConversationOut> {
+    if (config.mockApi) return mockApi.generateConversationTitle(id)
+    return request(`/chat/conversations/${id}/generate-title`, { method: 'POST' })
   },
 
   getProfile(): Promise<UserOut> {
@@ -281,19 +463,48 @@ export const api = {
     return request('/stacks/reorder', { method: 'PUT', body: JSON.stringify({ stack_ids: stackIds }) })
   },
 
+  listModuleVersions(): Promise<ModuleVersion[]> {
+    if (config.mockApi) return mockApi.listModuleVersions()
+    return request('/stacks/module-versions')
+  },
+
+  refreshStackModules(id: string): Promise<ModuleRefreshResult> {
+    if (config.mockApi) return mockApi.refreshStackModules(id)
+    return request(`/stacks/${id}/refresh-modules`, { method: 'POST' })
+  },
+
+  releaseStack(id: string, target: 'prod' | 'develop'): Promise<ReleaseResult> {
+    if (config.mockApi) return mockApi.releaseStack(id, target)
+    return request(`/stacks/${id}/release`, { method: 'POST', body: JSON.stringify({ target }) })
+  },
+
+  getStackTopology(id: string, refresh = false): Promise<Topology> {
+    if (config.mockApi) return mockApi.getStackTopology(id, refresh)
+    return request(`/stacks/${id}/topology${refresh ? '?refresh=true' : ''}`)
+  },
+
+  getLandingZoneAccessKeys(stackId: string, landingZoneName: string): Promise<AccessKeys> {
+    if (config.mockApi) return mockApi.getLandingZoneAccessKeys(stackId, landingZoneName)
+    return request(`/stacks/${stackId}/landing-zones/${encodeURIComponent(landingZoneName)}/access-keys`)
+  },
+
   listProjects(): Promise<ProjectOut[]> {
+    if (config.mockApi) return mockApi.listProjects()
     return request('/projects')
   },
 
   connectRepo(data: GitHubRepoConnect): Promise<GitHubRepoOut> {
+    if (config.mockApi) return mockApi.connectRepo(data)
     return request('/github/repos', { method: 'POST', body: JSON.stringify(data) })
   },
 
-  getRepo(projectName: string): Promise<GitHubRepoOut> {
-    return request(`/github/repos/${projectName}`)
+  getRepo(): Promise<GitHubRepoOut> {
+    if (config.mockApi) return mockApi.getRepo()
+    return request('/github/repos')
   },
 
-  disconnectRepo(projectName: string): Promise<void> {
-    return request(`/github/repos/${projectName}`, { method: 'DELETE' })
+  disconnectRepo(): Promise<void> {
+    if (config.mockApi) return mockApi.disconnectRepo()
+    return request('/github/repos', { method: 'DELETE' })
   },
 }

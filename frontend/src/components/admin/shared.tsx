@@ -2,6 +2,27 @@ import { Label } from '../ui/label'
 
 export type SaveStatus = 'idle' | 'saving' | 'saved' | 'error'
 
+export function InfoTooltip({ text }: { text: string }) {
+  return (
+    <span className="relative inline-flex items-center group/tooltip normal-case tracking-normal font-normal">
+      <svg
+        width="12"
+        height="12"
+        viewBox="0 0 16 16"
+        fill="none"
+        className="text-muted-foreground/50 hover:text-muted-foreground cursor-help shrink-0"
+      >
+        <circle cx="8" cy="8" r="7" stroke="currentColor" strokeWidth="1.3" />
+        <path d="M8 7.2v4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+        <circle cx="8" cy="4.8" r="0.8" fill="currentColor" />
+      </svg>
+      <span className="pointer-events-none absolute left-1/2 -translate-x-1/2 bottom-full mb-1.5 w-max max-w-[240px] rounded-md bg-popover border border-border/60 px-2.5 py-1.5 text-[11px] leading-snug text-popover-foreground opacity-0 shadow-lg transition-opacity group-hover/tooltip:opacity-100 z-50">
+        {text}
+      </span>
+    </span>
+  )
+}
+
 export function StatusMessage({ status, savedText = 'Saved', errorText = 'Failed to save' }: {
   status: SaveStatus
   savedText?: string
@@ -12,11 +33,12 @@ export function StatusMessage({ status, savedText = 'Saved', errorText = 'Failed
   return null
 }
 
-export function FieldRow({ id, label, children }: { id?: string; label: string; children: React.ReactNode }) {
+export function FieldRow({ id, label, hint, children }: { id?: string; label: string; hint?: string; children: React.ReactNode }) {
   return (
     <div className="space-y-1.5">
-      <Label htmlFor={id} className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+      <Label htmlFor={id} className="text-xs font-medium text-muted-foreground uppercase tracking-wide inline-flex items-center gap-1.5">
         {label}
+        {hint && <InfoTooltip text={hint} />}
       </Label>
       {children}
     </div>

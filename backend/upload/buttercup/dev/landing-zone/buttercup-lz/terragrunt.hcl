@@ -9,7 +9,6 @@ terraform {
 inputs = {
   name = "buttercup"
   env  = "dev"
-  existing_s3_bucket_arn = "arn:aws:s3:::linq-customer-cold-confidential-hw-buttercup-1-atmta068"
 
   create_access_keys = false
 
@@ -23,6 +22,6 @@ inputs = {
     data_owner          = "data"
     department          = "none"
     cost_center         = "none"
-    project_code        = "aura-infra"
+    project_code        = "aura"
   }
 }

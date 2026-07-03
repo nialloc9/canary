@@ -3,16 +3,20 @@ from datetime import datetime
 
 
 class GitHubRepoConnect(BaseModel):
-    project_name: str
+    """repo_full_name is always required — it identifies which repo the call
+    is about. Every other field is optional: omitting one means "keep the
+    existing value" when updating, or falls back to a sensible default when
+    connecting for the first time. See connect_repo() for how these resolve."""
+
     repo_full_name: str
-    branch: str = "develop"
-    token: str
-    api_url: str = "https://api.github.com"
-    infrastructure_base_path: str = "infrastructure"
-    auto_merge: bool = False
-    create_cicd: bool = True
-    skip_bootstrap: bool = False
-    skip_module_import: bool = False
+    branch: str | None = None
+    token: str | None = None
+    api_url: str | None = None
+    infrastructure_base_path: str | None = None
+    auto_merge: bool | None = None
+    create_cicd: bool | None = None
+    skip_bootstrap: bool | None = None
+    skip_module_import: bool | None = None
 
     @field_validator("repo_full_name")
     @classmethod
@@ -23,8 +27,8 @@ class GitHubRepoConnect(BaseModel):
 
     @field_validator("infrastructure_base_path")
     @classmethod
-    def normalise_base_path(cls, v: str) -> str:
-        return v.strip("/")
+    def normalise_base_path(cls, v: str | None) -> str | None:
+        return v.strip("/") if v is not None else v
 
 
 class GitHubRepoOut(BaseModel):

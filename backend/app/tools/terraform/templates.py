@@ -468,8 +468,9 @@ terraform {{
 }}
 
 inputs = {{
-  name = "{name}"
-  env  = "{env}"{optional_inputs}
+  name         = "{name}"
+  env          = "{env}"
+  project_name = "{project_code}"{optional_inputs}
 
   create_access_keys = {str(create_access_keys).lower()}
 

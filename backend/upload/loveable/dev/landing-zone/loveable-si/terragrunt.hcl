@@ -1,0 +1,47 @@
+include "base" {
+  path = find_in_parent_folders()
+}
+
+terraform {
+  source = "${get_parent_terragrunt_dir()}/modules/snowflake/s3-storage-integration"
+}
+
+dependency "lz" {
+  config_path = "../loveable-lz"
+
+  mock_outputs = {
+    s3_bucket_arn  = "arn:aws:s3:::MOCK_LOVEABLE_BUCKET"
+    s3_bucket_name = "MOCK_LOVEABLE_BUCKET"
+  }
+  mock_outputs_allowed_terraform_commands = ["validate", "plan"]
+}
+
+dependency "db" {
+  config_path = "../loveable-db"
+
+  mock_outputs = {
+    name = "MOCK_LOVEABLE"
+  }
+  mock_outputs_allowed_terraform_commands = ["validate", "plan"]
+}
+
+dependency "db_arch" {
+  config_path = "../loveable-db-arch"
+
+  mock_outputs = {
+    landing_zone_schema_name = "MOCK_LANDING_ZONE"
+  }
+  mock_outputs_allowed_terraform_commands = ["validate", "plan"]
+}
+
+inputs = {
+  name            = "loveable"
+  s3_bucket_arn   = dependency.lz.outputs.s3_bucket_arn
+  s3_bucket_name  = dependency.lz.outputs.s3_bucket_name
+  s3_stage_prefix = "data/"
+
+  snowflake_database = dependency.db.outputs.name
+  snowflake_schema   = dependency.db_arch.outputs.landing_zone_schema_name
+
+  file_format_type = "JSON"
+}

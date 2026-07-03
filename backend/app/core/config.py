@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     secret_key: str
     access_token_expire_minutes: int = 30
 
+    # LLM — see app/services/llm_client.py for the provider abstraction
+    llm_provider: str = "anthropic"
+
     # Anthropic
     anthropic_api_key: str
     anthropic_model: str = "claude-sonnet-4-6"

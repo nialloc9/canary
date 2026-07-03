@@ -18,6 +18,7 @@ from app.schemas.project import (
     StackStateOut,
 )
 import app.tools.terraform.templates as templates
+from app.tools.terraform.verify import verify_bootstrap_plan
 from app.services.github_service import GitHubService, GitHubError
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -27,16 +28,13 @@ def _secret_suffix(stack_name: str) -> str:
     return stack_name.upper().replace("-", "_")
 
 
-async def _get_project_or_404(name: str, account_id: str, db: AsyncSession) -> Project:
-    result = await db.execute(
-        select(Project).where(
-            Project.account_id == account_id,
-            Project.name == name,
-        )
-    )
+async def _get_project_or_404(account_id: str, db: AsyncSession) -> Project:
+    result = await db.execute(select(Project).where(Project.account_id == account_id))
     project = result.scalar_one_or_none()
     if not project:
-        raise HTTPException(status_code=404, detail=f"Project '{name}' not found")
+        raise HTTPException(
+            status_code=404, detail="No project found for this account — connect a GitHub repo first"
+        )
     return project
 
 
@@ -58,22 +56,20 @@ async def list_projects(
     return result.scalars().all()
 
 
-@router.get("/{name}", response_model=ProjectOut)
+@router.get("/current", response_model=ProjectOut)
 async def get_project(
-    name: str,
     db: AsyncSession = Depends(get_db),
     account_id: str = Depends(get_current_account_id),
 ):
-    return await _get_project_or_404(name, account_id, db)
+    return await _get_project_or_404(account_id, db)
 
 
-@router.post("/{name}/cicd", response_model=ProjectCiCdResponse, status_code=201)
+@router.post("/cicd", response_model=ProjectCiCdResponse, status_code=201)
 async def create_cicd(
-    name: str,
     db: AsyncSession = Depends(get_db),
     account_id: str = Depends(get_current_account_id),
 ):
-    project = await _get_project_or_404(name, account_id, db)
+    project = await _get_project_or_404(account_id, db)
 
     if not project.version_control_created:
         raise HTTPException(
@@ -84,12 +80,7 @@ async def create_cicd(
     if project.cicd_created:
         raise HTTPException(status_code=409, detail="CI/CD already created for this project")
 
-    repo_result = await db.execute(
-        select(GitHubRepo).where(
-            GitHubRepo.account_id == account_id,
-            GitHubRepo.project_name == name,
-        )
-    )
+    repo_result = await db.execute(select(GitHubRepo).where(GitHubRepo.account_id == account_id))
     repo = repo_result.scalar_one_or_none()
     if not repo:
         raise HTTPException(status_code=404, detail="No GitHub repo connected for this project")
@@ -203,7 +194,7 @@ async def create_cicd(
             raise HTTPException(status_code=422, detail=str(exc))
 
     auto_merged = False
-    if repo.auto_merge:
+    if repo.auto_merge and pr_url:
         try:
             pr_number = int(pr_url.rstrip("/").split("/")[-1])
             await svc.merge_pull_request(pr_number)
@@ -237,23 +228,22 @@ async def create_cicd(
     await db.flush()
 
     return ProjectCiCdResponse(
-        message="CI/CD setup complete",
+        message="CI/CD setup complete" if pr_url else "CI/CD setup complete — workflows already up to date, no PR needed",
         cicd_created=True,
-        pull_requests=[pr_url],
+        pull_requests=[pr_url] if pr_url else [],
         auto_merged=auto_merged,
         secrets_created=list(secrets.keys()),
         workflows_created=workflows,
     )
 
 
-@router.post("/{name}/bootstrap", response_model=ProjectBootstrapResponse, status_code=201)
+@router.post("/bootstrap", response_model=ProjectBootstrapResponse, status_code=201)
 async def bootstrap_infrastructure(
-    name: str,
     payload: ProjectBootstrapRequest,
     db: AsyncSession = Depends(get_db),
     account_id: str = Depends(get_current_account_id),
 ):
-    project = await _get_project_or_404(name, account_id, db)
+    project = await _get_project_or_404(account_id, db)
 
     if not project.version_control_created:
         raise HTTPException(
@@ -264,12 +254,7 @@ async def bootstrap_infrastructure(
     if project.infrastructure_bootstrapped:
         raise HTTPException(status_code=409, detail="Infrastructure already bootstrapped")
 
-    repo_result = await db.execute(
-        select(GitHubRepo).where(
-            GitHubRepo.account_id == account_id,
-            GitHubRepo.project_name == name,
-        )
-    )
+    repo_result = await db.execute(select(GitHubRepo).where(GitHubRepo.account_id == account_id))
     repo = repo_result.scalar_one_or_none()
     if not repo:
         raise HTTPException(status_code=404, detail="No GitHub repo connected for this project")
@@ -277,7 +262,7 @@ async def bootstrap_infrastructure(
     if repo.create_cicd and not project.cicd_created:
         raise HTTPException(
             status_code=409,
-            detail="CI/CD must be created before bootstrapping infrastructure. Call POST /api/v1/projects/{name}/cicd first.",
+            detail="CI/CD must be created before bootstrapping infrastructure. Call POST /api/v1/projects/cicd first.",
         )
 
     stacks = await _get_account_stacks(account_id, db)
@@ -290,9 +275,9 @@ async def bootstrap_infrastructure(
         override = overrides.get(s.name)
         stack_states.append({
             "stack": s,
-            "bucket": (override.bucket if override else None) or f"{name}-{s.name}-terraform-state",
+            "bucket": (override.bucket if override else None) or f"{project.name}-{s.name}-terraform-state",
             "region": (override.region if override else None) or "eu-west-1",
-            "lock_table": (override.lock_table if override else None) or f"{name}-{s.name}-terraform-lock",
+            "lock_table": (override.lock_table if override else None) or f"{project.name}-{s.name}-terraform-lock",
         })
 
     slug = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -335,9 +320,35 @@ async def bootstrap_infrastructure(
     )
 
     with tempfile.TemporaryDirectory() as staging:
+        staging_path = Path(staging)
+        for rel_path, content in bootstrap_files.items():
+            file_path = staging_path / rel_path
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_bytes(content)
+
+        verify_failures: list[str] = []
+        for st in stack_states:
+            stack = st["stack"]
+            if not stack.verify_before_pr:
+                continue
+            result = await verify_bootstrap_plan(
+                staging_path / "bootstrap" / stack.name, stack, max_attempts=stack.verify_max_attempts
+            )
+            if not result.ok:
+                verify_failures.append(
+                    f"Stack '{stack.name}' failed `terraform plan` after {result.attempts} attempt(s):\n"
+                    f"{result.log[-2000:]}"
+                )
+        if verify_failures:
+            raise HTTPException(
+                status_code=422,
+                detail="Bootstrap files failed pre-PR verification — no PR was opened.\n\n"
+                + "\n\n".join(verify_failures),
+            )
+
         try:
             pr_url, _ = await svc.open_pull_request(
-                local_dir=Path(staging),
+                local_dir=staging_path,
                 feature_branch=f"feat/terraform-state-bootstrap-{slug}",
                 commit_message=(
                     "feat(bootstrap): provision Terraform state backends for all stacks\n\n"

@@ -4,6 +4,7 @@ import { useAuth } from '../contexts/AuthContext'
 import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
 import { Label } from '../components/ui/label'
+import { Checkbox } from '../components/ui/checkbox'
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '../components/ui/card'
 
 export function LoginPage() {
@@ -11,6 +12,7 @@ export function LoginPage() {
   const navigate = useNavigate()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const [rememberMe, setRememberMe] = useState(false)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
@@ -19,7 +21,7 @@ export function LoginPage() {
     setError('')
     setLoading(true)
     try {
-      await login(username, password)
+      await login(username, password, rememberMe)
       navigate('/')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Login failed')
@@ -90,6 +92,16 @@ export function LoginPage() {
                   required
                   className="bg-input/50 border-border/60 focus-visible:ring-primary/50"
                 />
+              </div>
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  id="remember-me"
+                  checked={rememberMe}
+                  onCheckedChange={setRememberMe}
+                />
+                <Label htmlFor="remember-me" className="text-sm font-normal text-muted-foreground">
+                  Remember me
+                </Label>
               </div>
               {error && (
                 <p className="text-xs text-destructive bg-destructive/10 border border-destructive/20 px-3 py-2 rounded-md">

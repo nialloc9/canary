@@ -1,13 +1,17 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import String, DateTime, Text, ForeignKey, Boolean
+from sqlalchemy import String, DateTime, Text, ForeignKey, Boolean, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
 
 
 class Project(Base):
+    """One project per account — an account's single software delivery pipeline
+    (one GitHub repo, one CI/CD setup) that deploys to all of the account's stacks."""
+
     __tablename__ = "projects"
+    __table_args__ = (UniqueConstraint("account_id", name="uq_project_account"),)
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     account_id: Mapped[str] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
@@ -44,7 +48,10 @@ class CiCd(Base):
 
 
 class GitHubRepo(Base):
+    """One connected repo per account, matching the one-project-per-account rule."""
+
     __tablename__ = "github_repos"
+    __table_args__ = (UniqueConstraint("account_id", name="uq_github_repo_account"),)
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     account_id: Mapped[str] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)

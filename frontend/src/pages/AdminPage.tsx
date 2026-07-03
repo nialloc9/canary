@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { AppLayout } from '../components/AppLayout'
 import { api, OrgSettings, ProjectOut, GitHubRepoOut, GitHubRepoConnect } from '../api/client'
 import { Button } from '../components/ui/button'
@@ -37,7 +38,7 @@ function OrgTab() {
         <CardDescription>Update your workspace name and domain</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
-        <FieldRow id="org-name" label="Account name">
+        <FieldRow id="org-name" label="Account name" hint="Your workspace's display name, shown throughout the app.">
           <Input
             id="org-name"
             value={org.name}
@@ -45,7 +46,7 @@ function OrgTab() {
             className="bg-input/50 border-border/60"
           />
         </FieldRow>
-        <FieldRow id="org-domain" label="Account domain">
+        <FieldRow id="org-domain" label="Account domain" hint="Uniquely identifies your account — used to match teammates during signup.">
           <Input
             id="org-domain"
             value={org.domain}
@@ -66,9 +67,10 @@ function OrgTab() {
 
 
 // ── Projects tab ──────────────────────────────────────────────────────────────
+// One project per account — it's the account's single software delivery
+// pipeline (one GitHub repo, one CI/CD setup) that deploys to every stack.
 
 const EMPTY_FORM: GitHubRepoConnect = {
-  project_name: '',
   repo_full_name: '',
   branch: 'develop',
   token: '',
@@ -81,32 +83,49 @@ const EMPTY_FORM: GitHubRepoConnect = {
 }
 
 function ProjectsTab() {
-  const [projects, setProjects] = useState<ProjectOut[]>([])
-  const [repos, setRepos] = useState<Record<string, GitHubRepoOut>>({})
+  const [project, setProject] = useState<ProjectOut | null>(null)
+  const [repo, setRepo] = useState<GitHubRepoOut | null>(null)
   const [form, setForm] = useState<GitHubRepoConnect>(EMPTY_FORM)
   const [status, setStatus] = useState<SaveStatus>('idle')
   const [error, setError] = useState('')
-  const [disconnecting, setDisconnecting] = useState<string | null>(null)
+  const [disconnecting, setDisconnecting] = useState(false)
 
   useEffect(() => {
-    loadProjects()
+    load()
   }, [])
 
-  async function loadProjects() {
+  useEffect(() => {
+    setForm(
+      repo
+        ? {
+            repo_full_name: repo.repo_full_name,
+            branch: repo.branch,
+            token: '',
+            api_url: repo.api_url,
+            infrastructure_base_path: repo.infrastructure_base_path,
+            auto_merge: repo.auto_merge,
+            create_cicd: repo.create_cicd,
+            skip_bootstrap: repo.skip_bootstrap,
+            skip_module_import: repo.skip_module_import,
+          }
+        : EMPTY_FORM
+    )
+  }, [repo])
+
+  async function load() {
     try {
       const list = await api.listProjects()
-      setProjects(list)
-      const repoMap: Record<string, GitHubRepoOut> = {}
-      await Promise.all(
-        list.map(async p => {
-          if (p.version_control_created) {
-            try {
-              repoMap[p.name] = await api.getRepo(p.name)
-            } catch {}
-          }
-        })
-      )
-      setRepos(repoMap)
+      const p = list[0] ?? null
+      setProject(p)
+      if (p?.version_control_created) {
+        try {
+          setRepo(await api.getRepo())
+        } catch {
+          setRepo(null)
+        }
+      } else {
+        setRepo(null)
+      }
     } catch {}
   }
 
@@ -116,45 +135,43 @@ function ProjectsTab() {
     try {
       await api.connectRepo(form)
       setStatus('saved')
-      setForm(EMPTY_FORM)
       setTimeout(() => setStatus('idle'), 2500)
-      await loadProjects()
+      await load()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to connect repository')
       setStatus('error')
     }
   }
 
-  async function disconnect(projectName: string) {
-    setDisconnecting(projectName)
+  async function disconnect() {
+    setDisconnecting(true)
     try {
-      await api.disconnectRepo(projectName)
-      await loadProjects()
+      await api.disconnectRepo()
+      await load()
     } catch {}
-    setDisconnecting(null)
+    setDisconnecting(false)
   }
 
-  const isValid = form.project_name && form.repo_full_name && form.token
+  const isValid = form.repo_full_name && (form.token || repo)
 
   return (
     <div className="space-y-6">
       <Card>
         <CardHeader>
-          <CardTitle>Connect repository</CardTitle>
-          <CardDescription>Link a GitHub repo to a project to enable landing zone management</CardDescription>
+          <CardTitle>{repo ? 'Repository settings' : 'Connect repository'}</CardTitle>
+          <CardDescription>
+            {repo
+              ? "Update your account's GitHub connection"
+              : "Link your account's GitHub repo to enable landing zone management across every stack"}
+          </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="grid grid-cols-2 gap-4">
-            <FieldRow id="proj-name" label="Project name">
-              <Input
-                id="proj-name"
-                value={form.project_name}
-                onChange={e => setForm(f => ({ ...f, project_name: e.target.value }))}
-                placeholder="buttercup"
-                className="bg-input/50 border-border/60"
-              />
-            </FieldRow>
-            <FieldRow id="repo-full" label="Repository (owner/repo)">
+            <FieldRow
+              id="repo-full"
+              label="Repository (owner/repo)"
+              hint="The GitHub repository holding your Terraform/Terragrunt infrastructure, e.g. acme/infrastructure."
+            >
               <Input
                 id="repo-full"
                 value={form.repo_full_name}
@@ -163,7 +180,11 @@ function ProjectsTab() {
                 className="bg-input/50 border-border/60 font-mono text-sm"
               />
             </FieldRow>
-            <FieldRow id="repo-branch" label="Branch">
+            <FieldRow
+              id="repo-branch"
+              label="Branch"
+              hint="Base branch used when opening PRs for this repo connection."
+            >
               <Input
                 id="repo-branch"
                 value={form.branch}
@@ -172,17 +193,25 @@ function ProjectsTab() {
                 className="bg-input/50 border-border/60 font-mono text-sm"
               />
             </FieldRow>
-            <FieldRow id="repo-token" label="GitHub token">
+            <FieldRow
+              id="repo-token"
+              label="GitHub token"
+              hint="Personal access token with repo and workflow scopes — used to read/write files, open PRs, and manage secrets."
+            >
               <Input
                 id="repo-token"
                 type="password"
                 value={form.token}
                 onChange={e => setForm(f => ({ ...f, token: e.target.value }))}
-                placeholder="ghp_…"
+                placeholder={repo ? '••••••••  (leave blank to keep existing)' : 'ghp_…'}
                 className="bg-input/50 border-border/60 font-mono text-sm"
               />
             </FieldRow>
-            <FieldRow id="repo-base-path" label="Infrastructure base path">
+            <FieldRow
+              id="repo-base-path"
+              label="Infrastructure base path"
+              hint="Folder inside the repo where generated Terragrunt configs are committed, e.g. infrastructure."
+            >
               <Input
                 id="repo-base-path"
                 value={form.infrastructure_base_path}
@@ -241,60 +270,55 @@ function ProjectsTab() {
             disabled={!isValid || status === 'saving'}
             className="shadow-md shadow-primary/20"
           >
-            {status === 'saving' ? 'Connecting…' : 'Connect repository'}
+            {status === 'saving' ? (repo ? 'Saving…' : 'Connecting…') : repo ? 'Save settings' : 'Connect repository'}
           </Button>
-          <StatusMessage status={status} savedText="Repository connected" />
+          <StatusMessage status={status} savedText={repo ? 'Settings saved' : 'Repository connected'} />
         </CardFooter>
       </Card>
 
-      {projects.length > 0 && (
+      {project && (
         <Card>
           <CardHeader>
-            <CardTitle>Connected projects</CardTitle>
-            <CardDescription>Active projects and their infrastructure status</CardDescription>
+            <CardTitle>Project</CardTitle>
+            <CardDescription>Infrastructure status for this account's project</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
-            {projects.map(p => {
-              const repo = repos[p.name]
-              return (
-                <div key={p.id} className="rounded-lg border border-border/50 bg-muted/10 p-3.5 space-y-2.5">
-                  <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <p className="text-sm font-semibold">{p.name}</p>
-                      {repo && (
-                        <p className="text-xs text-muted-foreground font-mono mt-0.5">
-                          {repo.repo_full_name} · {repo.branch}
-                        </p>
-                      )}
-                    </div>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => disconnect(p.name)}
-                      disabled={disconnecting === p.name}
-                      className="text-xs border-destructive/30 text-destructive hover:bg-destructive/10 shrink-0"
-                    >
-                      {disconnecting === p.name ? 'Removing…' : 'Disconnect'}
-                    </Button>
-                  </div>
-                  <div className="flex flex-wrap gap-1.5">
-                    <StatusBadge ok={p.version_control_created} label="Repo" />
-                    <StatusBadge ok={p.infrastructure_bootstrapped} label="Bootstrapped" />
-                    <StatusBadge ok={p.cicd_created} label="CI/CD" />
-                    {repo?.skip_bootstrap && (
-                      <span className="inline-flex items-center text-[10px] font-medium px-1.5 py-0.5 rounded-full border bg-amber-500/10 border-amber-500/30 text-amber-600 dark:text-amber-400">
-                        skip bootstrap
-                      </span>
-                    )}
-                    {repo?.skip_module_import && (
-                      <span className="inline-flex items-center text-[10px] font-medium px-1.5 py-0.5 rounded-full border bg-amber-500/10 border-amber-500/30 text-amber-600 dark:text-amber-400">
-                        skip module import
-                      </span>
-                    )}
-                  </div>
+            <div className="rounded-lg border border-border/50 bg-muted/10 p-3.5 space-y-2.5">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold">{project.name}</p>
+                  {repo && (
+                    <p className="text-xs text-muted-foreground font-mono mt-0.5">
+                      {repo.repo_full_name} · {repo.branch}
+                    </p>
+                  )}
                 </div>
-              )
-            })}
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={disconnect}
+                  disabled={disconnecting}
+                  className="text-xs border-destructive/30 text-destructive hover:bg-destructive/10 shrink-0"
+                >
+                  {disconnecting ? 'Removing…' : 'Disconnect'}
+                </Button>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                <StatusBadge ok={project.version_control_created} label="Repo" />
+                <StatusBadge ok={project.infrastructure_bootstrapped} label="Bootstrapped" />
+                <StatusBadge ok={project.cicd_created} label="CI/CD" />
+                {repo?.skip_bootstrap && (
+                  <span className="inline-flex items-center text-[10px] font-medium px-1.5 py-0.5 rounded-full border bg-amber-500/10 border-amber-500/30 text-amber-600 dark:text-amber-400">
+                    skip bootstrap
+                  </span>
+                )}
+                {repo?.skip_module_import && (
+                  <span className="inline-flex items-center text-[10px] font-medium px-1.5 py-0.5 rounded-full border bg-amber-500/10 border-amber-500/30 text-amber-600 dark:text-amber-400">
+                    skip module import
+                  </span>
+                )}
+              </div>
+            </div>
           </CardContent>
         </Card>
       )}
@@ -310,8 +334,16 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'projects', label: 'Projects' },
 ]
 
+const TAB_IDS: Tab[] = ['organization', 'stacks', 'projects']
+
 export function AdminPage() {
-  const [activeTab, setActiveTab] = useState<Tab>('organization')
+  const [searchParams, setSearchParams] = useSearchParams()
+  const tabParam = searchParams.get('tab')
+  const activeTab: Tab = TAB_IDS.includes(tabParam as Tab) ? (tabParam as Tab) : 'organization'
+
+  function setActiveTab(tab: Tab) {
+    setSearchParams(tab === 'organization' ? {} : { tab })
+  }
 
   return (
     <AppLayout>

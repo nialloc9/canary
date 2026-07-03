@@ -43,7 +43,11 @@ async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db))
     db.add(account)
     await db.flush()
 
-    db.add(Stack(account_id=account.id, name="main", branch="main", sort_order=0, is_default=True))
+    # Every account gets a "dev" stack (tracks develop) and a "prod" stack (tracks
+    # main) — the release flow assumes both exist. "dev" is the default for new
+    # conversations/experimentation.
+    db.add(Stack(account_id=account.id, name="dev", branch="develop", sort_order=0, is_default=True))
+    db.add(Stack(account_id=account.id, name="prod", branch="main", sort_order=1, is_default=False))
     await db.flush()
 
     user = User(

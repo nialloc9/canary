@@ -1,9 +1,14 @@
 import { useState, useEffect } from 'react'
-import { api, StackOut, StackUpdate, WarehouseUpdate, CloudUpdate, WarehouseType, CloudProvider } from '../../api/client'
+import { api, StackOut, StackUpdate, WarehouseUpdate, CloudUpdate, WarehouseType, CloudProvider, ModuleVersion } from '../../api/client'
 import { Button } from '../../components/ui/button'
 import { Input } from '../../components/ui/input'
 import { Card, CardContent, CardFooter, CardHeader, CardTitle, CardDescription } from '../../components/ui/card'
-import { SaveStatus, StatusMessage, FieldRow, AWS_REGIONS, NativeSelect, ConnectionStatus } from '../../components/admin/shared'
+import { SaveStatus, StatusMessage, FieldRow, AWS_REGIONS, NativeSelect, ConnectionStatus, Toggle } from '../../components/admin/shared'
+import { TopologyDiagram } from '../../components/TopologyDiagram'
+
+// Matches backend/app/api/routes/stacks.py PROTECTED_STACK_NAMES — "dev" and
+// "prod" are auto-seeded and load-bearing for the release flow.
+const PROTECTED_STACK_NAMES = new Set(['dev', 'prod'])
 
 function SnowflakeIcon() {
   return (
@@ -84,8 +89,21 @@ function TilePicker<T extends string>({
   )
 }
 
-function StackDetail({ stack, isOnly, onChanged }: { stack: StackOut; isOnly: boolean; onChanged: () => void }) {
+function StackDetail({
+  stack,
+  isOnly,
+  moduleVersions,
+  onChanged,
+}: {
+  stack: StackOut
+  isOnly: boolean
+  moduleVersions: ModuleVersion[]
+  onChanged: () => void
+}) {
   const [branch, setBranch] = useState(stack.branch)
+  const [verifyBeforePr, setVerifyBeforePr] = useState(stack.verify_before_pr)
+  const [verifyMaxAttempts, setVerifyMaxAttempts] = useState(stack.verify_max_attempts)
+  const [moduleVersion, setModuleVersion] = useState(stack.module_version)
   const [warehouse, setWarehouse] = useState<WarehouseUpdate>(stack.warehouse)
   const [cloud, setCloud] = useState<CloudUpdate>(stack.cloud)
   const [pemInput, setPemInput] = useState('')
@@ -100,9 +118,15 @@ function StackDetail({ stack, isOnly, onChanged }: { stack: StackOut; isOnly: bo
   const [cloudTestMessage, setCloudTestMessage] = useState('')
   const [deleteError, setDeleteError] = useState('')
   const [deleting, setDeleting] = useState(false)
+  const [refreshStatus, setRefreshStatus] = useState<'idle' | 'refreshing' | 'done' | 'error'>('idle')
+  const [refreshMessage, setRefreshMessage] = useState('')
+  const [refreshPrUrl, setRefreshPrUrl] = useState<string | null>(null)
 
   useEffect(() => {
     setBranch(stack.branch)
+    setVerifyBeforePr(stack.verify_before_pr)
+    setVerifyMaxAttempts(stack.verify_max_attempts)
+    setModuleVersion(stack.module_version)
     setWarehouse(stack.warehouse)
     setCloud(stack.cloud)
     setHasExistingKey(!!stack.warehouse.private_key_b64)
@@ -112,6 +136,9 @@ function StackDetail({ stack, isOnly, onChanged }: { stack: StackOut; isOnly: bo
     setWarehouseTestStatus('idle')
     setCloudTestStatus('idle')
     setDeleteError('')
+    setRefreshStatus('idle')
+    setRefreshMessage('')
+    setRefreshPrUrl(null)
   }, [stack.id])
 
   function buildPayload(): StackUpdate {
@@ -123,7 +150,33 @@ function StackDetail({ stack, isOnly, onChanged }: { stack: StackOut; isOnly: bo
     if (secretInput) cl.secret_access_key = secretInput
     else delete cl.secret_access_key
 
-    return { branch, warehouse: wh, cloud: cl }
+    return {
+      branch,
+      verify_before_pr: verifyBeforePr,
+      verify_max_attempts: verifyMaxAttempts,
+      module_version: moduleVersion,
+      warehouse: wh,
+      cloud: cl,
+    }
+  }
+
+  async function hardRefreshModules() {
+    setRefreshStatus('refreshing')
+    setRefreshMessage('')
+    setRefreshPrUrl(null)
+    try {
+      const result = await api.refreshStackModules(stack.id)
+      setRefreshStatus('done')
+      setRefreshPrUrl(result.pr_url)
+      setRefreshMessage(
+        result.pr_url
+          ? `Opened a PR removing ${result.files_removed} file(s) and adding ${result.files_added} file(s).`
+          : result.message ?? 'Already up to date'
+      )
+    } catch (e) {
+      setRefreshStatus('error')
+      setRefreshMessage(e instanceof Error ? e.message : 'Failed to refresh modules')
+    }
   }
 
   async function save() {
@@ -180,7 +233,7 @@ function StackDetail({ stack, isOnly, onChanged }: { stack: StackOut; isOnly: bo
 
   const canTestWarehouse = !!warehouse.account_name && !!warehouse.user && (hasExistingKey || !!pemInput)
   const canTestCloud = !!cloud.access_key_id && (hasExistingSecret || !!secretInput)
-  const canDelete = !stack.is_default && !isOnly
+  const canDelete = !PROTECTED_STACK_NAMES.has(stack.name) && !isOnly
 
   return (
     <div className="space-y-6">
@@ -190,7 +243,7 @@ function StackDetail({ stack, isOnly, onChanged }: { stack: StackOut; isOnly: bo
           <CardDescription>Which branch triggers CI/CD for this stack, across every project</CardDescription>
         </CardHeader>
         <CardContent>
-          <FieldRow id="stack-branch" label="Git branch">
+          <FieldRow id="stack-branch" label="Git branch" hint="Must match a real branch in your connected GitHub repo.">
             <Input
               id="stack-branch"
               value={branch}
@@ -203,8 +256,88 @@ function StackDetail({ stack, isOnly, onChanged }: { stack: StackOut; isOnly: bo
             Pushes and PRs targeting this branch drive this stack's plan/apply jobs in every project's
             generated CI/CD workflow — independent of the other stacks' branches.
           </p>
+
+          <div className="mt-5 pt-4 border-t border-border/40">
+            <Toggle
+              id="stack-verify-before-pr"
+              checked={verifyBeforePr}
+              onChange={setVerifyBeforePr}
+              label="Verify before opening PRs"
+              hint="Run terragrunt/terraform plan against generated infra for this stack before opening a PR. On failure, Claude attempts to patch and retry — if it still fails after the retry limit below, no PR is opened. Off by default since it requires this stack's infra to already be bootstrapped and adds time to PR creation."
+            />
+            <div className={`mt-3 flex items-center gap-2 ${verifyBeforePr ? '' : 'opacity-40 pointer-events-none'}`}>
+              <label htmlFor="stack-verify-max-attempts" className="text-xs text-muted-foreground">
+                Retry limit
+              </label>
+              <Input
+                id="stack-verify-max-attempts"
+                type="number"
+                min={1}
+                max={10}
+                value={verifyMaxAttempts}
+                onChange={e => setVerifyMaxAttempts(Math.min(10, Math.max(1, Number(e.target.value) || 1)))}
+                disabled={!verifyBeforePr}
+                className="bg-input/50 border-border/60 text-sm w-20"
+              />
+              <span className="text-[10px] text-muted-foreground/60">
+                attempts before giving up and reporting the failure (1–10)
+              </span>
+            </div>
+          </div>
+
+          <div className="mt-5 pt-4 border-t border-border/40">
+            <FieldRow
+              id="stack-module-version"
+              label="Terraform module version"
+              hint="Which version of Canary's vendored Terraform modules new landing zones on this stack are generated with. Changing this doesn't touch anything already deployed — use 'Hard refresh modules' below to re-sync existing landing zones to the newly selected version."
+            >
+              <div className="flex items-center gap-2">
+                <NativeSelect
+                  id="stack-module-version"
+                  value={moduleVersion}
+                  onChange={setModuleVersion}
+                  className="max-w-[160px]"
+                >
+                  {moduleVersions.map(v => (
+                    <option key={v.version} value={v.version}>{v.version}</option>
+                  ))}
+                </NativeSelect>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={hardRefreshModules}
+                  disabled={refreshStatus === 'refreshing' || moduleVersion !== stack.module_version}
+                  className="border-border/60"
+                >
+                  {refreshStatus === 'refreshing' ? 'Refreshing…' : 'Hard refresh modules'}
+                </Button>
+              </div>
+            </FieldRow>
+            {moduleVersion !== stack.module_version && (
+              <p className="text-[11px] text-muted-foreground mt-2">Save the stack before refreshing — refresh always uses the saved version.</p>
+            )}
+            {refreshStatus === 'done' && (
+              <p className={`text-[11px] mt-2 ${refreshPrUrl ? 'text-foreground' : 'text-muted-foreground'}`}>
+                {refreshPrUrl ? (
+                  <>
+                    {refreshMessage}{' '}
+                    <a href={refreshPrUrl} target="_blank" rel="noreferrer" className="text-primary hover:text-primary/80 underline">
+                      View PR
+                    </a>
+                  </>
+                ) : (
+                  `✓ ${refreshMessage}`
+                )}
+              </p>
+            )}
+            {refreshStatus === 'error' && (
+              <p className="text-[11px] text-destructive mt-2">{refreshMessage}</p>
+            )}
+          </div>
         </CardContent>
       </Card>
+
+      <TopologyDiagram stackId={stack.id} />
 
       <Card>
         <CardHeader>
@@ -222,7 +355,7 @@ function StackDetail({ stack, isOnly, onChanged }: { stack: StackOut; isOnly: bo
           />
 
           <div className="grid grid-cols-2 gap-4">
-            <FieldRow id="stack-org" label="Organization">
+            <FieldRow id="stack-org" label="Organization" hint="Your Snowflake organization name, if you connect using org-account format.">
               <Input
                 id="stack-org"
                 value={warehouse.organization_name ?? ''}
@@ -234,7 +367,7 @@ function StackDetail({ stack, isOnly, onChanged }: { stack: StackOut; isOnly: bo
                 Leave blank if you connect with a legacy locator (e.g. <code className="text-muted-foreground/80">xy12345.us-east-1</code>) instead of an org name.
               </p>
             </FieldRow>
-            <FieldRow id="stack-account" label="Account identifier *">
+            <FieldRow id="stack-account" label="Account identifier *" hint="The account name portion of your Snowflake identifier, without the org prefix.">
               <Input
                 id="stack-account"
                 value={warehouse.account_name ?? ''}
@@ -248,7 +381,7 @@ function StackDetail({ stack, isOnly, onChanged }: { stack: StackOut; isOnly: bo
                 (<code className="text-muted-foreground/80">https://org-account.snowflakecomputing.com</code>).
               </p>
             </FieldRow>
-            <FieldRow id="stack-user" label="User *">
+            <FieldRow id="stack-user" label="User *" hint="The Snowflake username configured for key-pair (JWT) authentication.">
               <Input
                 id="stack-user"
                 value={warehouse.user ?? ''}
@@ -258,7 +391,7 @@ function StackDetail({ stack, isOnly, onChanged }: { stack: StackOut; isOnly: bo
             </FieldRow>
           </div>
 
-          <FieldRow id="stack-private-key" label="Private key (PEM)">
+          <FieldRow id="stack-private-key" label="Private key (PEM)" hint="Must match the public key registered on this Snowflake user via ALTER USER ... SET RSA_PUBLIC_KEY.">
             <textarea
               id="stack-private-key"
               value={pemInput}
@@ -273,7 +406,7 @@ function StackDetail({ stack, isOnly, onChanged }: { stack: StackOut; isOnly: bo
           <div>
             <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-3">Optional</p>
             <div className="grid grid-cols-2 gap-4">
-              <FieldRow id="stack-database" label="Database">
+              <FieldRow id="stack-database" label="Database" hint="Default Snowflake database used for this stack's queries and generated infrastructure.">
                 <Input
                   id="stack-database"
                   value={warehouse.database ?? ''}
@@ -282,7 +415,7 @@ function StackDetail({ stack, isOnly, onChanged }: { stack: StackOut; isOnly: bo
                   className="bg-input/50 border-border/60"
                 />
               </FieldRow>
-              <FieldRow id="stack-schema" label="Schema">
+              <FieldRow id="stack-schema" label="Schema" hint="Default schema within the database above.">
                 <Input
                   id="stack-schema"
                   value={warehouse.schema_ ?? ''}
@@ -291,7 +424,7 @@ function StackDetail({ stack, isOnly, onChanged }: { stack: StackOut; isOnly: bo
                   className="bg-input/50 border-border/60"
                 />
               </FieldRow>
-              <FieldRow id="stack-warehouse" label="Warehouse">
+              <FieldRow id="stack-warehouse" label="Warehouse" hint="The Snowflake virtual warehouse (compute) used to run queries for this stack.">
                 <Input
                   id="stack-warehouse"
                   value={warehouse.warehouse ?? ''}
@@ -300,7 +433,7 @@ function StackDetail({ stack, isOnly, onChanged }: { stack: StackOut; isOnly: bo
                   className="bg-input/50 border-border/60"
                 />
               </FieldRow>
-              <FieldRow id="stack-role" label="Role">
+              <FieldRow id="stack-role" label="Role" hint="Snowflake role assumed when connecting — determines what this stack's credentials can access.">
                 <Input
                   id="stack-role"
                   value={warehouse.role ?? ''}
@@ -342,7 +475,7 @@ function StackDetail({ stack, isOnly, onChanged }: { stack: StackOut; isOnly: bo
             onChange={v => setCloud(c => ({ ...c, provider: v }))}
           />
 
-          <FieldRow id="stack-aws-region" label="Default region">
+          <FieldRow id="stack-aws-region" label="Default region" hint="AWS region new resources are created in by default for this stack.">
             <NativeSelect
               id="stack-aws-region"
               value={cloud.region ?? 'us-east-1'}
@@ -353,7 +486,7 @@ function StackDetail({ stack, isOnly, onChanged }: { stack: StackOut; isOnly: bo
               ))}
             </NativeSelect>
           </FieldRow>
-          <FieldRow id="stack-aws-key-id" label="Access key ID">
+          <FieldRow id="stack-aws-key-id" label="Access key ID" hint="IAM access key ID for a user with least-privilege permissions to manage this stack's infrastructure.">
             <Input
               id="stack-aws-key-id"
               value={cloud.access_key_id ?? ''}
@@ -362,7 +495,7 @@ function StackDetail({ stack, isOnly, onChanged }: { stack: StackOut; isOnly: bo
               className="bg-input/50 border-border/60 font-mono text-sm"
             />
           </FieldRow>
-          <FieldRow id="stack-aws-secret" label="Secret access key">
+          <FieldRow id="stack-aws-secret" label="Secret access key" hint="Paired with the access key ID above. Stored encrypted; never displayed again after saving.">
             <div className="relative">
               <Input
                 id="stack-aws-secret"
@@ -444,9 +577,11 @@ export function StacksTab() {
   const [newStackName, setNewStackName] = useState('')
   const [addError, setAddError] = useState('')
   const [adding, setAdding] = useState(false)
+  const [moduleVersions, setModuleVersions] = useState<ModuleVersion[]>([])
 
   useEffect(() => {
     load()
+    api.listModuleVersions().then(setModuleVersions).catch(() => {})
   }, [])
 
   async function load(preferId?: string) {
@@ -548,7 +683,12 @@ export function StacksTab() {
       </Card>
 
       {selected ? (
-        <StackDetail stack={selected} isOnly={stacks.length <= 1} onChanged={() => load(selected.id)} />
+        <StackDetail
+          stack={selected}
+          isOnly={stacks.length <= 1}
+          moduleVersions={moduleVersions}
+          onChanged={() => load(selected.id)}
+        />
       ) : (
         <Card>
           <CardContent className="text-sm text-muted-foreground py-8 text-center">

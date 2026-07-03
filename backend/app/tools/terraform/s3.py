@@ -8,12 +8,12 @@ from sqlalchemy import select
 
 from app.tools.base import BaseTool
 import app.tools.terraform.templates as templates
+from app.tools.terraform.verify import verify_stack_plan
 from app.models.project import GitHubRepo, Project
 from app.models.stack import Stack, StackStateBackend
-from app.models.user import Account
 from app.services.github_service import GitHubService, GitHubError
-
-TERRAFORM_MODULES_DIR = Path(__file__).resolve().parents[3] / "terraform" / "modules"
+from app.services.aws_secrets_service import get_landing_zone_access_keys
+from app.services.module_versions_service import MODULE_COMPONENTS, module_source_dir
 
 
 class LandingZoneTool(BaseTool):
@@ -77,11 +77,6 @@ class LandingZoneTool(BaseTool):
                     "description": "Cost center code for billing",
                     "default": "none",
                 },
-                "project_code": {
-                    "type": "string",
-                    "description": "Project code for tracking",
-                    "default": "none",
-                },
                 "kms_key_arn": {
                     "type": "string",
                     "description": "ARN of a KMS key for SSE-KMS. Leave empty for AWS-managed key.",
@@ -137,7 +132,6 @@ class LandingZoneTool(BaseTool):
         region: str = "eu-west-1",
         department: str = "none",
         cost_center: str = "none",
-        project_code: str = "none",
         kms_key_arn: str = "",
         existing_s3_bucket_arn: str = "",
         s3_stage_prefix: str = "data/",
@@ -146,6 +140,7 @@ class LandingZoneTool(BaseTool):
         schema_names: list[str] = None,
         tags: dict = {},
         _action: str = "add",
+        _target_stack_names: list[str] | None = None,
     ) -> str:
         if schema_names is None:
             schema_names = ["bronze", "silver", "gold", "platinum"]
@@ -158,26 +153,21 @@ class LandingZoneTool(BaseTool):
         shutil.rmtree(upload_root, ignore_errors=True)
         os.makedirs(upload_root)
 
-        account = await self._get_account()
-        account_slug = account.name.lower().replace(" ", "-") if account else project_code
-
-        project = await self._get_project(project_code)
+        project = await self._get_project()
         if project is None:
-            return f"No project named '{project_code}' found. Connect a GitHub repo first via POST /api/v1/github/repos."
+            return "No project found for this account. Connect a GitHub repo first via POST /api/v1/github/repos."
         if not project.version_control_created:
-            return f"GitHub repo not yet connected for project '{project_code}'. Use POST /api/v1/github/repos."
-        repo_record = await self._get_github_repo(project_code)
+            return "GitHub repo not yet connected. Use POST /api/v1/github/repos."
+        repo_record = await self._get_github_repo()
 
         if not project.infrastructure_bootstrapped and not (repo_record and repo_record.skip_bootstrap):
             return (
-                f"Infrastructure not yet bootstrapped for project '{project_code}'. "
-                f"Call POST /api/v1/projects/{project_code}/bootstrap first."
+                "Infrastructure not yet bootstrapped. Call POST /api/v1/projects/bootstrap first."
             )
 
         if repo_record and repo_record.create_cicd and not project.cicd_created:
             return (
-                f"CI/CD not yet created for project '{project_code}'. "
-                f"Call POST /api/v1/projects/{project_code}/cicd first."
+                "CI/CD not yet created. Call POST /api/v1/projects/cicd first."
             )
 
         stacks_result = await self._db.execute(
@@ -186,6 +176,12 @@ class LandingZoneTool(BaseTool):
         stacks = list(stacks_result.scalars().all())
         if not stacks:
             return "No stacks configured for this account. Add one under Admin → Stacks first."
+
+        if _target_stack_names:
+            stacks = [s for s in stacks if s.name in _target_stack_names]
+            missing = set(_target_stack_names) - {s.name for s in stacks}
+            if missing:
+                return f"No stack(s) named {', '.join(sorted(missing))} found for this account."
 
         state_backend_by_stack: dict[str, StackStateBackend] = {}
         if repo_record:
@@ -197,18 +193,23 @@ class LandingZoneTool(BaseTool):
         state_configs = {
             s.name: {
                 "bucket": (state_backend_by_stack[s.id].state_bucket if s.id in state_backend_by_stack else None)
-                or f"{project_code}-{s.name}-terraform-state",
+                or f"{project.name}-{s.name}-terraform-state",
                 "region": (state_backend_by_stack[s.id].state_region if s.id in state_backend_by_stack else None)
                 or region,
                 "lock_table": (state_backend_by_stack[s.id].state_lock_table if s.id in state_backend_by_stack else None)
-                or f"{project_code}-{s.name}-terraform-lock",
+                or f"{project.name}-{s.name}-terraform-lock",
             }
             for s in stacks
         }
         stack_names = [s.name for s in stacks]
 
         if not (repo_record and repo_record.skip_module_import):
-            self._copy_modules(upload_root)
+            # Modules land on whichever branch(es) this call targets and are
+            # committed there — dev and prod naturally end up with independent
+            # copies (different branches), only converging once promoted via
+            # the release flow. Use the first targeted stack's pinned version
+            # as representative for this PR.
+            self._copy_modules(upload_root, stacks[0].module_version)
         if not (repo_record and repo_record.skip_bootstrap):
             self._write_root_hcl(upload_root, name, region, tags)
 
@@ -221,7 +222,7 @@ class LandingZoneTool(BaseTool):
             os.makedirs(env_dir, exist_ok=True)
 
             (env_top_dir / "env.hcl").write_text(templates.env_hcl(
-                account_slug, env,
+                project.name, env,
                 state_bucket=sc["bucket"],
                 state_region=sc["region"],
                 state_lock_table=sc["lock_table"],
@@ -249,7 +250,7 @@ class LandingZoneTool(BaseTool):
                     data_owner=data_owner,
                     department=department,
                     cost_center=cost_center,
-                    project_code=project_code,
+                    project_code=project.name,
                     create_access_keys=create_access_keys,
                     transition_to_ia_days=transition_to_ia_days,
                     transition_to_glacier_days=transition_to_glacier_days,
@@ -269,8 +270,33 @@ class LandingZoneTool(BaseTool):
                 )
             )
 
+        verify_failures: list[str] = []
+        for s in stacks:
+            if not s.verify_before_pr:
+                continue
+            result = await verify_stack_plan(upload_root / s.name, s, max_attempts=s.verify_max_attempts)
+            if not result.ok:
+                verify_failures.append(
+                    f"Stack '{s.name}' failed `terragrunt plan` after {result.attempts} attempt(s):\n"
+                    f"{result.log[-2000:]}"
+                )
+
+        if verify_failures:
+            return (
+                "Landing zone generated but failed pre-PR verification — no PR was opened.\n\n"
+                + "\n\n".join(verify_failures)
+                + "\n\nFix the issue and try again, or disable 'Verify before PR' for the affected "
+                "stack(s) in Admin → Stacks."
+            )
+
+        # A landing-zone PR normally targets the repo's account-level default
+        # branch — but each stack's content actually lives on that stack's own
+        # branch (e.g. dev -> develop, prod -> main). When this call is scoped
+        # to exactly one stack, target that stack's branch instead, so the PR
+        # actually lands where the stack's existing content already lives.
+        target_branch = stacks[0].branch if _target_stack_names and len(stacks) == 1 else None
+
         github_section = await self._open_github_pr(
-            repo_project_name=project_code,
             landing_zone_name=name,
             upload_root=upload_root,
             data_classification=data_classification,
@@ -278,6 +304,11 @@ class LandingZoneTool(BaseTool):
             schema_names=schema_names,
             stack_names=stack_names,
             action=_action,
+            target_branch=target_branch,
+        )
+
+        access_keys_section = (
+            await self._access_keys_section(name, project.name, stacks) if create_access_keys else ""
         )
 
         stack_structure = "\n".join(
@@ -298,14 +329,17 @@ class LandingZoneTool(BaseTool):
             f"  Schemas:             {', '.join(schema_names)}\n\n"
             f"Structure:\n"
             f"  upload/{name}/\n"
-            f"    modules/aws/landing-zone/\n"
-            f"    modules/snowflake/database/\n"
-            f"    modules/snowflake/medallion-arch/\n"
-            f"    modules/snowflake/s3-storage-integration/\n"
+            f"    modules/ (version {stacks[0].module_version})\n"
+            f"      aws/landing-zone/\n"
+            f"      aws/secret/\n"
+            f"      snowflake/database/\n"
+            f"      snowflake/medallion-arch/\n"
+            f"      snowflake/s3-storage-integration/\n"
             f"    terragrunt.hcl        (root config)\n"
             f"    global.hcl\n"
             f"{stack_structure}\n"
             f"{github_section}\n"
+            f"{access_keys_section}"
             f"To deploy ({first_stack}):\n"
             f"  terragrunt run-all plan  --terragrunt-working-dir {first_stack}/landing-zone\n"
             f"  terragrunt run-all apply --terragrunt-working-dir {first_stack}/landing-zone"
@@ -313,7 +347,6 @@ class LandingZoneTool(BaseTool):
 
     async def _open_github_pr(
         self,
-        repo_project_name: str,
         landing_zone_name: str,
         upload_root: Path,
         data_classification: str,
@@ -321,19 +354,11 @@ class LandingZoneTool(BaseTool):
         schema_names: list[str],
         stack_names: list[str],
         action: str = "add",
+        target_branch: str | None = None,
     ) -> str:
-        result = await self._db.execute(
-            select(GitHubRepo).where(
-                GitHubRepo.account_id == self._account_id,
-                GitHubRepo.project_name == repo_project_name,
-            )
-        )
-        record = result.scalar_one_or_none()
-
+        record = await self._get_github_repo()
         if not record:
-            record = await self._create_and_store_repo(repo_project_name)
-            if record is None:
-                return "\n  GitHub: no base connection found — use POST /api/v1/github/repos to connect one first\n\n"
+            return "\n  GitHub: no repo connected — use POST /api/v1/github/repos to connect one first\n\n"
 
         slug = datetime.now().strftime("%Y%m%d-%H%M%S")
         conv_type = "feat" if action == "add" else "chore"
@@ -372,10 +397,11 @@ class LandingZoneTool(BaseTool):
             f"🤖 Generated by Canary"
         )
 
+        base_branch = target_branch or record.branch
         svc = GitHubService(
             token=record.token,
             repo_full_name=record.repo_full_name,
-            branch=record.branch,
+            branch=base_branch,
             api_url=record.api_url,
             base_path=record.infrastructure_base_path,
         )
@@ -388,59 +414,48 @@ class LandingZoneTool(BaseTool):
                 pr_title=pr_title,
                 pr_body=pr_body,
             )
+            if pr_url is None:
+                return f"\n  GitHub: no changes — {record.repo_full_name} already matches this config, no PR opened\n\n"
             if record.auto_merge:
                 pr_number = int(pr_url.rstrip("/").split("/")[-1])
                 await svc.merge_pull_request(pr_number)
                 return (
                     f"\n  GitHub: merged PR #{pr_number} with {file_count} files → {record.repo_full_name}\n"
-                    f"  Branch: {feature_branch} → {record.branch}\n"
+                    f"  Branch: {feature_branch} → {base_branch}\n"
                     f"  PR:     {pr_url} (merged)\n\n"
                 )
             return (
                 f"\n  GitHub: opened PR with {file_count} files → {record.repo_full_name}\n"
-                f"  Branch: {feature_branch} → {record.branch}\n"
+                f"  Branch: {feature_branch} → {base_branch}\n"
                 f"  PR:     {pr_url}\n\n"
             )
         except GitHubError as exc:
             return f"\n  GitHub: PR failed — {exc}\n\n"
 
-    async def _create_and_store_repo(self, project_name: str) -> GitHubRepo | None:
-        """Find the base GitHub connection, create a new repo, store and return the record."""
-        base_result = await self._db.execute(
-            select(GitHubRepo).where(GitHubRepo.account_id == self._account_id).limit(1)
-        )
-        base = base_result.scalar_one_or_none()
-        if not base:
-            return None
-
-        repo_name = f"{base.project_name}-{project_name}"
-        svc = GitHubService(
-            token=base.token,
-            repo_full_name="",
-            branch=base.branch,
-            api_url=base.api_url,
-        )
-        try:
-            created = await svc.create_repo(
-                name=repo_name,
-                private=True,
-                description=f"Infrastructure for {project_name}",
-            )
-        except GitHubError:
-            return None
-
-        record = GitHubRepo(
-            account_id=self._account_id,
-            project_name=project_name,
-            repo_full_name=created["full_name"],
-            branch=base.branch,
-            token=base.token,
-            api_url=base.api_url,
-            infrastructure_base_path=base.infrastructure_base_path,
-        )
-        self._db.add(record)
-        await self._db.flush()
-        return record
+    async def _access_keys_section(self, landing_zone_name: str, project_name: str, stacks: list[Stack]) -> str:
+        """Best-effort: the keys only exist in Secrets Manager once this PR is
+        merged and applied, which doesn't happen synchronously here — so this
+        either reports the real values (re-running on an already-deployed
+        landing zone) or tells the user to ask again once it's live."""
+        lines = ["Access keys (from AWS Secrets Manager):"]
+        any_found = False
+        for stack in stacks:
+            keys = await get_landing_zone_access_keys(stack, project_name, landing_zone_name)
+            if keys is None:
+                lines.append(f"  {stack.name}: not available yet — ask me again once this PR is merged and applied.")
+            else:
+                any_found = True
+                lines.append(
+                    f"  {stack.name}:\n"
+                    f"    Access key ID:     {keys['access_key_id']}\n"
+                    f"    Secret access key: {keys['secret_access_key']}"
+                )
+        if not any_found:
+            lines = [
+                "Access keys: not available yet — this PR needs to be merged and applied first. "
+                "Ask me for the access keys again once that's done."
+            ]
+        return "\n".join(lines) + "\n\n"
 
     @staticmethod
     def _lifecycle_days(retention_policy: str) -> tuple[int, int, int]:
@@ -453,38 +468,18 @@ class LandingZoneTool(BaseTool):
             "indefinite": (30, 90, 0),
         }.get(retention_policy, (30, 90, 365))
 
-    async def _get_account(self) -> "Account | None":
-        result = await self._db.execute(
-            select(Account).where(Account.id == self._account_id)
-        )
+    async def _get_project(self) -> "Project | None":
+        result = await self._db.execute(select(Project).where(Project.account_id == self._account_id))
         return result.scalar_one_or_none()
 
-    async def _get_project(self, project_name: str) -> "Project | None":
-        result = await self._db.execute(
-            select(Project).where(
-                Project.account_id == self._account_id,
-                Project.name == project_name,
-            )
-        )
+    async def _get_github_repo(self) -> "GitHubRepo | None":
+        result = await self._db.execute(select(GitHubRepo).where(GitHubRepo.account_id == self._account_id))
         return result.scalar_one_or_none()
 
-    async def _get_github_repo(self, project_name: str) -> "GitHubRepo | None":
-        result = await self._db.execute(
-            select(GitHubRepo).where(
-                GitHubRepo.account_id == self._account_id,
-                GitHubRepo.project_name == project_name,
-            )
-        )
-        return result.scalar_one_or_none()
-
-    def _copy_modules(self, upload_root: Path) -> None:
-        for rel_path in (
-            "aws/landing-zone",
-            "snowflake/database",
-            "snowflake/medallion-arch",
-            "snowflake/s3-storage-integration",
-        ):
-            src = TERRAFORM_MODULES_DIR / rel_path
+    def _copy_modules(self, upload_root: Path, module_version: str) -> None:
+        version_dir = module_source_dir(module_version)
+        for rel_path in MODULE_COMPONENTS:
+            src = version_dir / rel_path
             dst = upload_root / "modules" / rel_path
             if src.exists():
                 os.makedirs(dst.parent, exist_ok=True)

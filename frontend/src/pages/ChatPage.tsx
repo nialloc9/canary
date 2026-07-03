@@ -1,9 +1,12 @@
 import { useState, useEffect, useRef, FormEvent, KeyboardEvent } from 'react'
-import { api, ChatResponse, ConversationOut } from '../api/client'
+import { Link, useNavigate, useParams } from 'react-router-dom'
+import { api, ChatResponse, ConversationOut, StackOut, ReleaseResult, ProjectOut } from '../api/client'
 import { AppLayout } from '../components/AppLayout'
 import { Button } from '../components/ui/button'
 import { Textarea } from '../components/ui/textarea'
 import { ScrollArea } from '../components/ui/scroll-area'
+import { TopologyDiagram } from '../components/TopologyDiagram'
+import { Markdown } from '../components/Markdown'
 
 interface Message {
   role: 'user' | 'assistant'
@@ -25,17 +28,73 @@ function CanaryLogo({ size = 20 }: { size?: number }) {
 }
 
 export function ChatPage() {
+  const { conversationId: activeConvId } = useParams<{ conversationId?: string }>()
+  const navigate = useNavigate()
   const [conversations, setConversations] = useState<ConversationOut[]>([])
-  const [activeConvId, setActiveConvId] = useState<string | undefined>()
+  const [loadedConvId, setLoadedConvId] = useState<string | undefined>()
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
+  const [stacks, setStacks] = useState<StackOut[]>([])
+  const [selectedStackId, setSelectedStackId] = useState<string | undefined>()
+  const [releaseStep, setReleaseStep] = useState<'idle' | 'confirm-dev' | 'choose-target'>('idle')
+  const [releaseChoice, setReleaseChoice] = useState<'prod' | 'develop'>('prod')
+  const [releasing, setReleasing] = useState(false)
+  const [releaseResult, setReleaseResult] = useState<ReleaseResult | null>(null)
+  const [releaseError, setReleaseError] = useState('')
+  const [showTopology, setShowTopology] = useState(false)
+  const [projects, setProjects] = useState<ProjectOut[]>([])
+  const [editingConvId, setEditingConvId] = useState<string | undefined>()
+  const [editingTitle, setEditingTitle] = useState('')
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   useEffect(() => {
     api.getConversations().then(setConversations).catch(() => {})
+    api.listStacks().then(list => {
+      setStacks(list)
+      setSelectedStackId(prev => prev ?? (list.find(s => s.is_default) ?? list[0])?.id)
+    }).catch(() => {})
+    api.listProjects().then(setProjects).catch(() => {})
   }, [])
+
+  useEffect(() => {
+    setReleaseStep('idle')
+    setReleaseResult(null)
+    setReleaseError('')
+    setShowTopology(false)
+  }, [selectedStackId])
+
+  const selectedStack = stacks.find(s => s.id === selectedStackId)
+
+  const githubConnected = projects.some(p => p.version_control_created)
+  const missingConfig: { label: string; href: string }[] = []
+  if (selectedStack) {
+    if (!githubConnected) {
+      missingConfig.push({ label: 'a GitHub repository', href: '/admin?tab=projects' })
+    }
+    if (!selectedStack.cloud.access_key_id || !selectedStack.cloud.secret_access_key) {
+      missingConfig.push({ label: 'cloud access', href: '/admin?tab=stacks' })
+    }
+    if (!selectedStack.warehouse.account_name || !selectedStack.warehouse.user || !selectedStack.warehouse.private_key_b64) {
+      missingConfig.push({ label: 'a warehouse', href: '/admin?tab=stacks' })
+    }
+  }
+
+  async function doRelease(target: 'prod' | 'develop') {
+    if (!selectedStackId) return
+    setReleaseStep('idle')
+    setReleasing(true)
+    setReleaseError('')
+    setReleaseResult(null)
+    try {
+      const result = await api.releaseStack(selectedStackId, target)
+      setReleaseResult(result)
+    } catch (e) {
+      setReleaseError(e instanceof Error ? e.message : 'Release failed')
+    }
+    setReleasing(false)
+  }
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -48,6 +107,70 @@ export function ChatPage() {
     el.style.height = `${Math.min(el.scrollHeight, 200)}px`
   }, [input])
 
+  // The URL is the source of truth for which conversation is active — reload
+  // its messages whenever it changes (including on first mount, e.g. after a
+  // page refresh on /chat/:id), but skip refetching if we already have them
+  // loaded (e.g. right after send() creates a new conversation).
+  useEffect(() => {
+    if (!activeConvId) {
+      setMessages([])
+      setLoadedConvId(undefined)
+      return
+    }
+    if (activeConvId === loadedConvId) return
+    setMessages([])
+    api.getConversation(activeConvId).then(full => {
+      setMessages((full.messages ?? []).map(m => ({ role: m.role, content: m.content })))
+      if (full.stack_id) setSelectedStackId(full.stack_id)
+      setLoadedConvId(activeConvId)
+    }).catch(() => {
+      navigate('/', { replace: true })
+    })
+  }, [activeConvId])
+
+  // Auto-title the conversation being left behind, if it's still Untitled —
+  // keyed on activeConvId itself (not tied to any one button) so it fires no
+  // matter how the user navigates away: "New conversation", clicking a
+  // different conversation in the sidebar, or the "Chat" nav link.
+  const prevConvIdRef = useRef<string | undefined>(undefined)
+  useEffect(() => {
+    const prevId = prevConvIdRef.current
+    prevConvIdRef.current = activeConvId
+    if (!prevId || prevId === activeConvId) return
+
+    const prevConv = conversations.find(c => c.id === prevId)
+    if (prevConv && !prevConv.title) {
+      api.generateConversationTitle(prevId)
+        .then(updated => setConversations(cs => cs.map(c => (c.id === prevId ? { ...c, title: updated.title } : c))))
+        .catch(() => {})
+    }
+  }, [activeConvId])
+
+  function selectConversation(conv: ConversationOut) {
+    navigate(`/chat/${conv.id}`)
+  }
+
+  function startNewConversation() {
+    setSelectedStackId((stacks.find(s => s.is_default) ?? stacks[0])?.id)
+    navigate('/')
+  }
+
+  function startRenaming(conv: ConversationOut) {
+    setEditingConvId(conv.id)
+    setEditingTitle(conv.title || '')
+  }
+
+  async function commitRename() {
+    const id = editingConvId
+    const title = editingTitle.trim()
+    setEditingConvId(undefined)
+    if (!id || !title) return
+    try {
+      const updated = await api.renameConversation(id, title)
+      setConversations(cs => cs.map(c => (c.id === id ? { ...c, title: updated.title } : c)))
+    } catch {}
+  }
+
   async function send() {
     const text = input.trim()
     if (!text || sending) return
@@ -55,10 +178,11 @@ export function ChatPage() {
     setMessages(m => [...m, { role: 'user', content: text }])
     setSending(true)
     try {
-      const res: ChatResponse = await api.chat(text, activeConvId)
-      setActiveConvId(res.conversation_id)
+      const res: ChatResponse = await api.chat(text, activeConvId, selectedStackId)
       setMessages(m => [...m, { role: 'assistant', content: res.reply }])
+      setLoadedConvId(res.conversation_id)
       if (!activeConvId) {
+        navigate(`/chat/${res.conversation_id}`, { replace: true })
         api.getConversations().then(setConversations).catch(() => {})
       }
     } catch (err) {
@@ -93,7 +217,7 @@ export function ChatPage() {
           variant="outline"
           size="sm"
           className="w-full h-8 text-xs justify-start gap-1.5 border-border/50 bg-transparent text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-          onClick={() => { setActiveConvId(undefined); setMessages([]) }}
+          onClick={startNewConversation}
         >
           <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
             <path d="M6 1v10M1 6h10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
@@ -102,7 +226,7 @@ export function ChatPage() {
         </Button>
       </div>
 
-      <ScrollArea className="flex-1 px-2 py-1">
+      <ScrollArea className="flex-1 min-h-0 px-2 py-1">
         {conversations.length === 0 ? (
           <p className="text-xs text-muted-foreground/60 text-center py-6">No conversations yet</p>
         ) : (
@@ -110,19 +234,50 @@ export function ChatPage() {
             <p className="text-[10px] font-medium text-muted-foreground/50 uppercase tracking-widest px-2 py-1.5">
               Recent
             </p>
-            {conversations.map(conv => (
-              <button
-                key={conv.id}
-                onClick={() => { setActiveConvId(conv.id); setMessages([]) }}
-                className={`w-full text-left px-2 py-1.5 rounded-md text-xs truncate transition-colors ${
-                  conv.id === activeConvId
-                    ? 'bg-primary/15 text-primary font-medium'
-                    : 'text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground'
-                }`}
-              >
-                {conv.title || 'Untitled'}
-              </button>
-            ))}
+            {conversations.map(conv =>
+              editingConvId === conv.id ? (
+                <input
+                  key={conv.id}
+                  autoFocus
+                  value={editingTitle}
+                  onChange={e => setEditingTitle(e.target.value)}
+                  onBlur={commitRename}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') commitRename()
+                    if (e.key === 'Escape') setEditingConvId(undefined)
+                  }}
+                  className="w-full px-2 py-1.5 rounded-md text-xs bg-sidebar-accent text-sidebar-accent-foreground outline-none ring-1 ring-primary/50"
+                />
+              ) : (
+                <div
+                  key={conv.id}
+                  className={`group/conv flex items-center gap-1 rounded-md transition-colors ${
+                    conv.id === activeConvId
+                      ? 'bg-primary/15 text-primary font-medium'
+                      : 'text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground'
+                  }`}
+                >
+                  <button
+                    onClick={() => selectConversation(conv)}
+                    className="flex-1 min-w-0 text-left px-2 py-1.5 text-xs truncate"
+                  >
+                    {conv.title || 'Untitled'}
+                  </button>
+                  <button
+                    onClick={e => {
+                      e.stopPropagation()
+                      startRenaming(conv)
+                    }}
+                    aria-label="Rename conversation"
+                    className="shrink-0 p-1 mr-1 rounded opacity-0 group-hover/conv:opacity-100 text-muted-foreground/60 hover:text-foreground transition-opacity"
+                  >
+                    <svg width="11" height="11" viewBox="0 0 16 16" fill="none">
+                      <path d="M11 2l3 3-8 8-3.5 1 1-3.5 8-8z" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  </button>
+                </div>
+              )
+            )}
           </div>
         )}
       </ScrollArea>
@@ -160,7 +315,7 @@ export function ChatPage() {
           </div>
         </div>
       ) : (
-        <ScrollArea className="flex-1">
+        <ScrollArea className="flex-1 min-h-0">
           <div className="max-w-2xl mx-auto py-8 space-y-2 px-4">
             {messages.map((msg, i) => (
               <div
@@ -187,9 +342,7 @@ export function ChatPage() {
                   <p className="text-[10px] font-semibold text-muted-foreground/60 mb-1.5 uppercase tracking-widest">
                     {msg.role === 'assistant' ? 'Canary' : 'You'}
                   </p>
-                  <p className="text-sm leading-relaxed whitespace-pre-wrap text-foreground/90">
-                    {msg.content}
-                  </p>
+                  <Markdown content={msg.content} />
                 </div>
               </div>
             ))}
@@ -220,6 +373,169 @@ export function ChatPage() {
       )}
 
       <div className="border-t border-border/50 bg-background/80 backdrop-blur-sm px-4 pt-3 pb-4">
+        {stacks.length > 0 && (
+          <div className="max-w-2xl mx-auto mb-2 flex items-center gap-1.5">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" className="text-muted-foreground/50 shrink-0">
+              <path d="M12 2v20M12 2l-3 3M12 2l3 3M12 22l-3-3M12 22l3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+              <path d="M2 12h20M2 12l3-3M2 12l3 3M22 12l-3-3M22 12l-3 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+            </svg>
+            <select
+              value={selectedStackId ?? ''}
+              onChange={e => setSelectedStackId(e.target.value || undefined)}
+              aria-label="Stack this conversation is about"
+              className="bg-transparent text-xs text-muted-foreground border border-border/50 rounded-md px-2 py-1 outline-none focus:border-primary/50 focus:text-foreground cursor-pointer"
+            >
+              <option value="">No stack selected</option>
+              {stacks.map(s => (
+                <option key={s.id} value={s.id}>
+                  {s.name}{s.is_default ? ' (default)' : ''}
+                </option>
+              ))}
+            </select>
+
+            {selectedStack && selectedStack.name !== 'prod' && releaseStep === 'idle' && (
+              <button
+                type="button"
+                onClick={() => setReleaseStep(selectedStack.name === 'dev' ? 'confirm-dev' : 'choose-target')}
+                disabled={releasing}
+                className="text-xs text-muted-foreground border border-border/50 rounded-md px-2 py-1 hover:text-foreground hover:border-primary/50 transition-colors"
+              >
+                Release
+              </button>
+            )}
+
+            {selectedStack && (
+              <button
+                type="button"
+                onClick={() => setShowTopology(v => !v)}
+                className={`text-xs border rounded-md px-2 py-1 transition-colors ${
+                  showTopology
+                    ? 'text-foreground border-primary/50 bg-primary/10'
+                    : 'text-muted-foreground border-border/50 hover:text-foreground hover:border-primary/50'
+                }`}
+              >
+                {showTopology ? 'Hide infrastructure' : 'View infrastructure'}
+              </button>
+            )}
+          </div>
+        )}
+
+        {selectedStack && missingConfig.length > 0 && (
+          <div className="max-w-2xl mx-auto mb-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 space-y-1">
+            <p className="text-xs text-amber-600 dark:text-amber-400">
+              <strong>{selectedStack.name}</strong> hasn't been set up yet — some actions may fail until it is.
+            </p>
+            <div className="flex flex-wrap gap-x-3 gap-y-0.5">
+              {missingConfig.map(item => (
+                <Link
+                  key={item.label}
+                  to={item.href}
+                  className="text-xs text-amber-600 dark:text-amber-400 underline underline-offset-2 hover:text-amber-500"
+                >
+                  Configure {item.label} →
+                </Link>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {selectedStack && showTopology && (
+          <div className="max-w-2xl mx-auto mb-2 rounded-lg border border-border/50 bg-muted/10 p-3.5">
+            <TopologyDiagram stackId={selectedStack.id} bare />
+          </div>
+        )}
+
+        {selectedStack && releaseStep !== 'idle' && (
+          <div className="max-w-2xl mx-auto mb-2 rounded-lg border border-border/50 bg-muted/10 p-3.5 space-y-3">
+            {releaseStep === 'confirm-dev' && (
+              <>
+                <p className="text-sm">Release dev to prod?</p>
+                <p className="text-xs text-muted-foreground">
+                  Opens a PR from a new branch based on <code className="font-mono">main</code> (merging
+                  in <code className="font-mono">develop</code>'s changes) into <code className="font-mono">main</code>,
+                  plus a companion PR into <code className="font-mono">develop</code> to keep it in sync.
+                </p>
+                <div className="flex gap-2">
+                  <Button size="sm" onClick={() => doRelease('prod')} className="shadow-md shadow-primary/20">
+                    Release to prod
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => setReleaseStep('idle')} className="border-border/60">
+                    Cancel
+                  </Button>
+                </div>
+              </>
+            )}
+
+            {releaseStep === 'choose-target' && (
+              <>
+                <p className="text-sm">Release {selectedStack.name} to:</p>
+                <div className="flex gap-4 text-sm">
+                  <label className="flex items-center gap-1.5 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="release-target"
+                      checked={releaseChoice === 'develop'}
+                      onChange={() => setReleaseChoice('develop')}
+                    />
+                    develop
+                  </label>
+                  <label className="flex items-center gap-1.5 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="release-target"
+                      checked={releaseChoice === 'prod'}
+                      onChange={() => setReleaseChoice('prod')}
+                    />
+                    main
+                  </label>
+                </div>
+                {releaseChoice === 'prod' && (
+                  <p className="text-xs text-muted-foreground">
+                    Releasing to main also opens a companion PR into develop to keep it in sync.
+                  </p>
+                )}
+                <div className="flex gap-2">
+                  <Button size="sm" onClick={() => doRelease(releaseChoice)} className="shadow-md shadow-primary/20">
+                    Confirm
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => setReleaseStep('idle')} className="border-border/60">
+                    Cancel
+                  </Button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {releasing && (
+          <p className="max-w-2xl mx-auto mb-2 text-xs text-muted-foreground">Releasing…</p>
+        )}
+
+        {releaseResult && (
+          <div className="max-w-2xl mx-auto mb-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 space-y-1">
+            <p className="text-xs font-medium text-emerald-600 dark:text-emerald-400">
+              {releaseResult.pr_urls.length > 1 ? 'PRs opened' : 'PR opened'}
+            </p>
+            {releaseResult.pr_urls.map(url => (
+              <a
+                key={url}
+                href={url}
+                target="_blank"
+                rel="noreferrer"
+                className="block text-xs text-primary underline break-all"
+              >
+                {url}
+              </a>
+            ))}
+          </div>
+        )}
+
+        {releaseError && (
+          <p className="max-w-2xl mx-auto mb-2 text-xs text-destructive bg-destructive/10 border border-destructive/20 px-3 py-2 rounded-md">
+            {releaseError}
+          </p>
+        )}
+
         <form
           onSubmit={handleFormSubmit}
           className="max-w-2xl mx-auto flex items-end gap-2 rounded-xl border border-border/60 bg-muted/20 px-3 py-2.5 focus-within:border-primary/50 focus-within:bg-muted/30 transition-colors"

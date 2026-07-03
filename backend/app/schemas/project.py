@@ -41,5 +41,5 @@ class ProjectBootstrapRequest(BaseModel):
 
 
 class ProjectBootstrapResponse(BaseModel):
-    pr_url: str
+    pr_url: str | None
     stacks: list[StackStateOut]

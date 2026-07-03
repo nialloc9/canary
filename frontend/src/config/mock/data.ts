@@ -1,4 +1,15 @@
-import type { TokenResponse, UserOut, ConversationOut, OrgSettings, StackOut } from '../../api/client'
+import type {
+  TokenResponse,
+  UserOut,
+  ConversationOut,
+  OrgSettings,
+  StackOut,
+  ProjectOut,
+  GitHubRepoOut,
+  Topology,
+  AccessKeys,
+  ModuleVersion,
+} from '../../api/client'
 
 export const MOCK_TOKENS: TokenResponse = {
   access_token: 'mock-access-token',
@@ -26,6 +37,9 @@ export const MOCK_STACKS: StackOut[] = [
     id: 'mock-stack-main',
     name: 'main',
     branch: 'main',
+    verify_before_pr: false,
+    verify_max_attempts: 3,
+    module_version: '1.0.0',
     sort_order: 0,
     is_default: true,
     warehouse: {
@@ -51,21 +65,130 @@ export const MOCK_STACKS: StackOut[] = [
   },
 ]
 
+export const MOCK_PROJECT: ProjectOut = {
+  id: 'mock-project-1',
+  name: 'canary-demo',
+  version_control_created: true,
+  cicd_created: true,
+  infrastructure_bootstrapped: true,
+  created_at: new Date().toISOString(),
+}
+
+export const MOCK_REPO: GitHubRepoOut = {
+  id: 'mock-repo-1',
+  project_name: 'canary-demo',
+  repo_full_name: 'canary-demo/data-platform',
+  branch: 'develop',
+  api_url: 'https://api.github.com',
+  infrastructure_base_path: 'infrastructure',
+  auto_merge: false,
+  create_cicd: true,
+  skip_bootstrap: false,
+  skip_module_import: false,
+  created_at: new Date().toISOString(),
+  updated_at: new Date().toISOString(),
+}
+
+export const MOCK_TOPOLOGY: Topology = {
+  nodes: [
+    {
+      id: 'core-s3-bucket',
+      landing_zone: 'core',
+      type: 's3_bucket',
+      label: 'Landing bucket',
+      fields: {
+        name: 'canary-demo-core-landing',
+        data_classification: 'internal',
+        retention_policy: '90 days',
+      },
+    },
+    {
+      id: 'core-storage-integration',
+      landing_zone: 'core',
+      type: 'storage_integration',
+      label: 'Storage integration',
+      fields: {
+        s3_stage_prefix: 'raw/',
+        file_format_type: 'PARQUET',
+      },
+    },
+    {
+      id: 'core-snowflake-database',
+      landing_zone: 'core',
+      type: 'snowflake_database',
+      label: 'Snowflake database',
+      fields: {
+        name: 'ANALYTICS',
+      },
+    },
+    {
+      id: 'core-medallion-schemas',
+      landing_zone: 'core',
+      type: 'medallion_schemas',
+      label: 'Medallion schemas',
+      fields: {
+        schema_names: 'bronze, silver, gold',
+        data_classification: 'internal',
+      },
+    },
+    {
+      id: 'core-snowpipe',
+      landing_zone: 'core',
+      type: 'snowpipe',
+      label: 'Snowpipe',
+      fields: {
+        snowflake_database: 'ANALYTICS',
+        snowflake_schema: 'bronze',
+        target_table: 'raw_events',
+      },
+    },
+  ],
+  edges: [
+    { source: 'core-s3-bucket', target: 'core-storage-integration' },
+    { source: 'core-storage-integration', target: 'core-snowflake-database' },
+    { source: 'core-snowflake-database', target: 'core-medallion-schemas' },
+    { source: 'core-medallion-schemas', target: 'core-snowpipe' },
+  ],
+  fetched_at: new Date().toISOString(),
+  connected: true,
+  error: null,
+  skipped: [],
+}
+
+export const MOCK_MODULE_VERSIONS: ModuleVersion[] = [
+  {
+    version: '1.0.0',
+    released_at: '2026-07-03',
+    notes: 'Initial versioned release: S3 landing zone, Snowflake database + medallion schemas, Snowflake storage integration, and the access-keys secret module.',
+  },
+]
+
+export const MOCK_ACCESS_KEYS: AccessKeys = {
+  access_key_id: 'AKIAIOSFODNN7EXAMPLE',
+  secret_access_key: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+}
+
 export const MOCK_CONVERSATIONS: ConversationOut[] = [
   {
     id: 'conv-1',
     title: 'Pipeline failure investigation',
+    stack_id: 'mock-stack-main',
     created_at: new Date(Date.now() - 1000 * 60 * 60 * 2).toISOString(),
+    messages: [],
   },
   {
     id: 'conv-2',
     title: 'Snowflake query optimisation',
+    stack_id: null,
     created_at: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString(),
+    messages: [],
   },
   {
     id: 'conv-3',
     title: 'Anomaly detection setup',
+    stack_id: null,
     created_at: new Date(Date.now() - 1000 * 60 * 60 * 48).toISOString(),
+    messages: [],
   },
 ]
 

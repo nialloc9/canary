@@ -4,16 +4,14 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-import anthropic
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
-from app.core.config import get_settings
+from app.services.llm_client import LLMClient
+from app.services.github_service import GitHubService, GitHubError
 from app.tools.base import BaseTool
 from app.models.project import GitHubRepo
 from app.models.stack import Stack
-
-settings = get_settings()
 
 _EXTRACT_PROMPT = """\
 You are reading Terragrunt HCL files generated for a landing zone named "{name}".
@@ -26,6 +24,7 @@ Extract the current configuration and return it as a JSON object with exactly th
   s3_stage_prefix      - string
   file_format_type     - string, one of: JSON, CSV, PARQUET, AVRO, ORC, XML
   schema_names         - list of strings
+  create_access_keys   - boolean (true if an IAM user with access keys was created for direct S3 access)
 
 HCL files:
 
@@ -40,7 +39,7 @@ class UpdateLandingZoneTool(BaseTool):
     def __init__(self, db: AsyncSession, account_id: str):
         self._db = db
         self._account_id = account_id
-        self._client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+        self._llm = LLMClient()
 
     @property
     def name(self) -> str:
@@ -52,7 +51,11 @@ class UpdateLandingZoneTool(BaseTool):
             "Update an existing landing zone. Clones the connected GitHub repo, reads the "
             "current Terragrunt config for the named landing zone, applies only the fields "
             "you specify, regenerates the configs, and opens a PR with the changes. "
-            "Only provide the fields you want to change — everything else is preserved as-is."
+            "Only provide the fields you want to change — everything else is preserved as-is. "
+            "By default this applies the change to every stack (e.g. dev AND prod) — always pass "
+            "stack_name when the user's request is specific to one environment (e.g. 'only in dev', "
+            "'prod should stay the same', 'just for staging'), otherwise you will silently change "
+            "every other stack too."
         )
 
     @property
@@ -64,9 +67,11 @@ class UpdateLandingZoneTool(BaseTool):
                     "type": "string",
                     "description": "Landing zone name (e.g. cress, buttercup)",
                 },
-                "project_code": {
+                "stack_name": {
                     "type": "string",
-                    "description": "Project the landing zone belongs to",
+                    "description": "Restrict this change to a single stack (e.g. 'dev'). Required whenever "
+                    "the request is scoped to one environment. Omit only when the user explicitly wants "
+                    "the change applied to every stack on the account.",
                 },
                 "data_classification": {
                     "type": "string",
@@ -88,14 +93,18 @@ class UpdateLandingZoneTool(BaseTool):
                     "type": "array",
                     "items": {"type": "string"},
                 },
+                "create_access_keys": {
+                    "type": "boolean",
+                    "description": "Create an IAM user with access keys for direct S3 access to this landing zone's bucket.",
+                },
             },
-            "required": ["name", "project_code"],
+            "required": ["name"],
         }
 
     async def execute(
         self,
         name: str,
-        project_code: str,
+        stack_name: str | None = None,
         data_classification: str | None = None,
         retention_policy: str | None = None,
         data_owner: str | None = None,
@@ -104,25 +113,53 @@ class UpdateLandingZoneTool(BaseTool):
         s3_stage_prefix: str | None = None,
         file_format_type: str | None = None,
         schema_names: list[str] | None = None,
+        create_access_keys: bool | None = None,
     ) -> str:
-        repo = await self._get_github_repo(project_code)
+        repo = await self._get_github_repo()
         if not repo:
-            return f"No GitHub repo connected for project '{project_code}'."
+            return "No GitHub repo connected. Use POST /api/v1/github/repos first."
 
-        reference_stack = await self._get_reference_stack_name()
-        if not reference_stack:
-            return "No stacks configured for this account. Add one under Admin → Stacks first."
+        if stack_name:
+            reference_stack = await self._get_stack(stack_name)
+            if not reference_stack:
+                return f"No stack named '{stack_name}' found for this account."
+        else:
+            reference_stack = await self._get_reference_stack()
+            if not reference_stack:
+                return "No stacks configured for this account. Add one under Admin → Stacks first."
+
+        # Each stack's landing-zone content lives on that stack's own branch
+        # (e.g. dev -> develop, prod -> main) — not necessarily the repo's
+        # account-level default branch.
+        stack_branch = reference_stack.branch
 
         clone_dir = tempfile.mkdtemp(prefix="lz-update-")
         try:
-            self._clone(repo, clone_dir)
-            current = await self._extract_config(name, clone_dir, repo.infrastructure_base_path, reference_stack)
+            self._clone(repo, clone_dir, stack_branch)
+            current = await self._extract_config(name, clone_dir, repo.infrastructure_base_path, reference_stack.name)
         except subprocess.CalledProcessError as exc:
             shutil.rmtree(clone_dir, ignore_errors=True)
-            return f"Failed to clone {repo.repo_full_name}: {exc.stderr.decode()}"
-        except (json.JSONDecodeError, KeyError) as exc:
+            return f"Failed to clone {repo.repo_full_name} (branch '{stack_branch}'): {exc.stderr.decode()}"
+        except KeyError:
             shutil.rmtree(clone_dir, ignore_errors=True)
-            return f"Could not extract config for landing zone '{name}' from {repo.repo_full_name}: {exc}"
+            open_pr_url = await self._find_likely_unmerged_pr(repo, name, stack_branch)
+            if open_pr_url:
+                return (
+                    f"'{name}' isn't on the '{stack_branch}' branch yet — but there's an open, unmerged PR "
+                    f"that looks like it created it: {open_pr_url}\n\nMerge that PR first, then ask me again."
+                )
+            return (
+                f"Could not find '{name}' under {reference_stack.name}/landing-zone/ on the "
+                f"'{stack_branch}' branch (the '{reference_stack.name}' stack's branch), and no matching "
+                f"open PR was found either. Things to check:\n"
+                f"  - Is '{name}-lz' the right landing zone name? (Also tried '{name}-si', '{name}-db-arch'.)\n"
+                f"  - Was it created for a different stack? Try again with stack_name set to that stack "
+                f"(currently checked: '{reference_stack.name}', branch '{stack_branch}').\n"
+                f"  - Does infrastructure_base_path in GitHub settings match where it actually lives in the repo?"
+            )
+        except json.JSONDecodeError as exc:
+            shutil.rmtree(clone_dir, ignore_errors=True)
+            return f"Could not parse the current config for landing zone '{name}' from {repo.repo_full_name}: {exc}"
         finally:
             shutil.rmtree(clone_dir, ignore_errors=True)
 
@@ -137,6 +174,7 @@ class UpdateLandingZoneTool(BaseTool):
                 "s3_stage_prefix": s3_stage_prefix,
                 "file_format_type": file_format_type,
                 "schema_names": schema_names,
+                "create_access_keys": create_access_keys,
             }.items()
             if v is not None
         }
@@ -147,7 +185,6 @@ class UpdateLandingZoneTool(BaseTool):
         tool = LandingZoneTool(self._db, self._account_id)
         return await tool.execute(
             name=name,
-            project_code=project_code,
             data_classification=merged.get("data_classification", "internal"),
             retention_policy=merged.get("retention_policy", "1-year"),
             data_owner=merged.get("data_owner", "unknown"),
@@ -156,15 +193,17 @@ class UpdateLandingZoneTool(BaseTool):
             s3_stage_prefix=merged.get("s3_stage_prefix", "data/"),
             file_format_type=merged.get("file_format_type", "JSON"),
             schema_names=merged.get("schema_names", ["bronze", "silver", "gold", "platinum"]),
+            create_access_keys=merged.get("create_access_keys", False),
             _action="update",
+            _target_stack_names=[stack_name] if stack_name else None,
         )
 
     # ------------------------------------------------------------------
 
-    def _clone(self, repo: GitHubRepo, clone_dir: str) -> None:
+    def _clone(self, repo: GitHubRepo, clone_dir: str, branch: str) -> None:
         clone_url = f"https://{repo.token}@github.com/{repo.repo_full_name}.git"
         subprocess.run(
-            ["git", "clone", "--depth", "1", "--branch", repo.branch, clone_url, clone_dir],
+            ["git", "clone", "--depth", "1", "--branch", branch, clone_url, clone_dir],
             check=True,
             capture_output=True,
         )
@@ -173,9 +212,11 @@ class UpdateLandingZoneTool(BaseTool):
         base = Path(clone_dir) / base_path
         files: dict[str, str] = {}
 
-        # Read the files Claude needs to reconstruct config, taken from the
-        # account's first stack (lowest sort_order) — every stack shares the
-        # same logical landing-zone config, so any one stack is representative.
+        # Read the files Claude needs to reconstruct config, from `reference_stack`
+        # — either the specific stack being updated (stack_name was given) or the
+        # account's lowest-sort-order stack as a representative default (a plain,
+        # unscoped update applies uniformly to every stack anyway). The clone was
+        # already checked out to that stack's own branch, so this is just a path.
         for component in (f"{name}-lz", f"{name}-si", f"{name}-db-arch"):
             hcl = base / reference_stack / "landing-zone" / component / "terragrunt.hcl"
             if hcl.exists():
@@ -195,31 +236,43 @@ class UpdateLandingZoneTool(BaseTool):
         files_text = "\n\n".join(f"=== {k} ===\n{v}" for k, v in files.items())
         prompt = _EXTRACT_PROMPT.format(name=name, files=files_text)
 
-        response = await self._client.messages.create(
-            model=settings.anthropic_model,
-            max_tokens=512,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        text = response.content[0].text.strip()
+        text = await self._llm.complete(prompt, max_tokens=512)
         # Strip markdown fences if the model adds them anyway
         if text.startswith("```"):
             text = text.split("```")[1].lstrip("json").strip()
         return json.loads(text)
 
-    async def _get_github_repo(self, project_name: str) -> "GitHubRepo | None":
-        result = await self._db.execute(
-            select(GitHubRepo).where(
-                GitHubRepo.account_id == self._account_id,
-                GitHubRepo.project_name == project_name,
-            )
-        )
+    async def _get_github_repo(self) -> "GitHubRepo | None":
+        result = await self._db.execute(select(GitHubRepo).where(GitHubRepo.account_id == self._account_id))
         return result.scalar_one_or_none()
 
-    async def _get_reference_stack_name(self) -> str | None:
+    async def _get_reference_stack(self) -> "Stack | None":
         result = await self._db.execute(
-            select(Stack.name)
+            select(Stack)
             .where(Stack.account_id == self._account_id)
             .order_by(Stack.sort_order)
             .limit(1)
         )
         return result.scalar_one_or_none()
+
+    async def _get_stack(self, stack_name: str) -> "Stack | None":
+        result = await self._db.execute(
+            select(Stack).where(Stack.account_id == self._account_id, Stack.name == stack_name)
+        )
+        return result.scalar_one_or_none()
+
+    async def _find_likely_unmerged_pr(self, repo: GitHubRepo, landing_zone_name: str, branch: str) -> str | None:
+        """The most common reason config extraction fails: the landing zone was
+        just created but its PR hasn't been merged yet, so it genuinely isn't on
+        that stack's branch. Check for an open PR before telling the user it's missing."""
+        svc = GitHubService(
+            token=repo.token,
+            repo_full_name=repo.repo_full_name,
+            branch=branch,
+            api_url=repo.api_url,
+            base_path=repo.infrastructure_base_path,
+        )
+        try:
+            return await svc.find_open_pr_by_branch_substring(f"{landing_zone_name}-landing-zone-")
+        except GitHubError:
+            return None

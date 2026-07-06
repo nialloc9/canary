@@ -13,8 +13,7 @@ from app.tools.terraform.verify import verify_stack_plan
 from app.models.project import GitHubRepo
 from app.models.stack import Stack
 from app.services.github_service import GitHubService, GitHubError
-
-MODULES_DIR = Path(__file__).resolve().parents[4] / "terraform" / "modules" / "aws"
+from app.services.module_versions_service import module_source_dir
 
 
 class SnowflakePipeTool(BaseTool):
@@ -30,9 +29,20 @@ class SnowflakePipeTool(BaseTool):
     @property
     def description(self) -> str:
         return (
-            "Add Snowpipe auto-ingest to an existing landing zone. "
-            "Creates a Snowflake pipe that automatically ingests files dropped "
-            "into the landing zone S3 bucket into a target Snowflake table. "
+            "Retrofit Snowpipe auto-ingest onto a landing zone that was already created without it. "
+            "Creates the target Bronze table (RAW_DATA VARIANT, SOURCE_FILE, LOAD_TIMESTAMP) and a "
+            "Snowflake pipe that automatically ingests files dropped into the landing zone S3 bucket "
+            "into it. Terraform owns only this raw ingestion shape — Silver/Gold modeling from the "
+            "Bronze table onward is dbt's responsibility, not Terraform's. "
+            "The target database/schema are always derived from this landing zone's own {name}-db and "
+            "{name}-db-arch components via Terragrunt dependency blocks — never pass or guess literal "
+            "Snowflake identifiers, since the actual names are transformed by those modules (uppercased, "
+            "and the schema is suffixed with its data classification, e.g. bronze -> BRONZE_CONFIDENTIAL) "
+            "and guessing them wrong fails at apply time with a Snowflake 'object does not exist' error. "
+            "Requires {name}-db and {name}-db-arch to already exist (true for any landing zone created "
+            "via create_landing_zone). "
+            "If you're creating a brand-new landing zone and it also needs Snowpipe, prefer passing "
+            "create_snowpipe=true directly to create_landing_zone instead of calling this afterward. "
             "By default this applies to every stack configured on the account — always pass "
             "stack_name when the user's request is specific to one environment (e.g. 'only in dev'), "
             "otherwise you will silently change every other stack too."
@@ -53,17 +63,11 @@ class SnowflakePipeTool(BaseTool):
                     "request is scoped to one environment. Omit only when the user explicitly wants it "
                     "added to every stack on the account.",
                 },
-                "snowflake_database": {
-                    "type": "string",
-                    "description": "Snowflake database that contains the target schema and table",
-                },
-                "snowflake_schema": {
-                    "type": "string",
-                    "description": "Snowflake schema that contains the target table",
-                },
                 "target_table": {
                     "type": "string",
-                    "description": "Unqualified target table name for COPY INTO (e.g. RAW_DATA)",
+                    "description": "Unqualified name for the Bronze table this creates (e.g. RAW_EVENTS). "
+                    "Terraform creates this table with a fixed RAW_DATA VARIANT / SOURCE_FILE / "
+                    "LOAD_TIMESTAMP shape and loads it via the pipe's COPY INTO — it must not already exist.",
                 },
                 "filter_prefix": {
                     "type": "string",
@@ -76,14 +80,12 @@ class SnowflakePipeTool(BaseTool):
                     "default": "",
                 },
             },
-            "required": ["name", "snowflake_database", "snowflake_schema", "target_table"],
+            "required": ["name", "target_table"],
         }
 
     async def execute(
         self,
         name: str,
-        snowflake_database: str,
-        snowflake_schema: str,
         target_table: str,
         stack_name: str | None = None,
         filter_prefix: str = "",
@@ -112,7 +114,10 @@ class SnowflakePipeTool(BaseTool):
         with tempfile.TemporaryDirectory() as staging:
             staging_path = Path(staging)
 
-            src = MODULES_DIR / "snowflake-pipe"
+            # Sourced from the same versioned modules tree as the rest of the
+            # landing zone; representative version = the first targeted
+            # stack's pinned version (mirrors LandingZoneTool._copy_modules).
+            src = module_source_dir(stacks[0].module_version) / "aws" / "snowflake-pipe"
             if src.exists():
                 shutil.copytree(src, staging_path / "modules" / "aws" / "snowflake-pipe")
 
@@ -120,10 +125,8 @@ class SnowflakePipeTool(BaseTool):
                 pipe_dir = staging_path / env / "landing-zone" / f"{name}-pipe"
                 pipe_dir.mkdir(parents=True, exist_ok=True)
                 (pipe_dir / "terragrunt.hcl").write_text(
-                    templates.pipe(
+                    templates.pipe_from_landing_zone(
                         name=name,
-                        snowflake_database=snowflake_database,
-                        snowflake_schema=snowflake_schema,
                         target_table=target_table,
                         filter_prefix=filter_prefix,
                         filter_suffix=filter_suffix,
@@ -137,8 +140,6 @@ class SnowflakePipeTool(BaseTool):
             github_section = await self._open_pr(
                 name=name,
                 staging_path=staging_path,
-                snowflake_database=snowflake_database,
-                snowflake_schema=snowflake_schema,
                 target_table=target_table,
                 stack_names=stack_names,
                 target_branch=target_branch,
@@ -146,10 +147,9 @@ class SnowflakePipeTool(BaseTool):
 
         return (
             f"Snowpipe added to '{name}' landing zone\n\n"
-            f"  Database:     {snowflake_database}\n"
-            f"  Schema:       {snowflake_schema}\n"
-            f"  Target table: {target_table}\n"
-            f"  Filter:       prefix='{filter_prefix}' suffix='{filter_suffix}'\n"
+            f"  Database/schema: derived from {name}-db / {name}-db-arch (via dependency blocks)\n"
+            f"  Bronze table:    {target_table} (RAW_DATA VARIANT, SOURCE_FILE, LOAD_TIMESTAMP — created by Terraform)\n"
+            f"  Filter:          prefix='{filter_prefix}' suffix='{filter_suffix}'\n"
             f"{github_section}\n"
             f"To deploy:\n"
             f"  terragrunt run-all apply --terragrunt-working-dir {stack_names[0]}/landing-zone/{name}-pipe"
@@ -227,8 +227,6 @@ class SnowflakePipeTool(BaseTool):
         self,
         name: str,
         staging_path: Path,
-        snowflake_database: str,
-        snowflake_schema: str,
         target_table: str,
         stack_names: list[str],
         target_branch: str | None = None,
@@ -242,19 +240,22 @@ class SnowflakePipeTool(BaseTool):
         feature_branch = f"feat/{name}-snowpipe-{slug}"
         commit_message = (
             f"feat(snowpipe): add {name} auto-ingest pipe\n\n"
-            f"- Target: {snowflake_database}.{snowflake_schema}.{target_table}\n"
+            f"- Target: {name}-db / {name}-db-arch . {target_table}\n"
             f"- Stacks: {', '.join(stack_names)}"
         )
         pr_title = f"feat(snowpipe): add {name} auto-ingest pipe"
         pr_body = (
             f"## Summary\n\n"
             f"Adds Snowpipe auto-ingest for the `{name}` landing zone.\n\n"
-            f"- **Pipe** auto-ingests files from the `{name}` S3 bucket into "
-            f"`{snowflake_database}.{snowflake_schema}.{target_table}`\n"
+            f"- **Bronze table** `{target_table}` created by Terraform in `{name}-db` / `{name}-db-arch`'s "
+            f"own database/schema (resolved via dependency blocks, not hardcoded) with a fixed "
+            f"`RAW_DATA VARIANT`, `SOURCE_FILE`, `LOAD_TIMESTAMP` shape — Silver/Gold modeling from here "
+            f"is dbt's responsibility, not Terraform's\n"
+            f"- **Pipe** auto-ingests files from the `{name}` S3 bucket into that table\n"
             f"- S3 event notifications wired to Snowpipe's managed SQS queue\n\n"
             f"## Test plan\n\n"
             f"- [ ] `terragrunt validate` passes in `{stack_names[0]}/landing-zone/{name}-pipe`\n"
-            f"- [ ] `terragrunt plan` shows `snowflake_pipe` and `aws_s3_bucket_notification`\n"
+            f"- [ ] `terragrunt plan` shows `snowflake_table`, `snowflake_pipe`, and `aws_s3_bucket_notification`\n"
             f"- [ ] Drop a test file into the bucket and confirm it appears in `{target_table}`\n\n"
             f"---\n🤖 Generated by Canary"
         )

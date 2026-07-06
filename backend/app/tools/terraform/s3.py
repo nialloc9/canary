@@ -38,6 +38,10 @@ class LandingZoneTool(BaseTool):
             "{name}-db, {name}-db-arch, and {name}-lz folders wired together via "
             "dependencies. Requires data classification, retention policy, and "
             "data owner. "
+            "Optionally also provisions Snowpipe auto-ingest in the same call — set "
+            "create_snowpipe=true with a bronze_table_name and this adds a {name}-pipe "
+            "component wired to this landing zone's own bucket/database/schema/stage, "
+            "creating the Bronze table and loading files into it automatically. "
             "By default this applies to every stack configured on the account (e.g. dev AND "
             "prod) — always pass stack_name when the request is scoped to one environment "
             "(e.g. 'add this to prod', 'only in dev'), otherwise you will silently change "
@@ -125,6 +129,33 @@ class LandingZoneTool(BaseTool):
                     "description": "Medallion schema names",
                     "default": ["bronze", "silver", "gold", "platinum"],
                 },
+                "create_snowpipe": {
+                    "type": "boolean",
+                    "description": "Also provision Snowpipe auto-ingest for this landing zone: creates a "
+                    "Bronze table (RAW_DATA VARIANT, SOURCE_FILE, LOAD_TIMESTAMP) in the bronze schema and "
+                    "a pipe that automatically loads files dropped into the S3 bucket into it. Requires "
+                    "bronze_table_name. Applies to every targeted stack the same way — use the standalone "
+                    "create_snowflake_pipe tool instead if you need per-stack pipe config or are retrofitting "
+                    "onto a landing zone that already exists.",
+                    "default": False,
+                },
+                "bronze_table_name": {
+                    "type": "string",
+                    "description": "Unqualified name for the Bronze table Snowpipe loads into (e.g. "
+                    "RAW_EVENTS). Required when create_snowpipe is true.",
+                    "default": "",
+                },
+                "snowpipe_filter_prefix": {
+                    "type": "string",
+                    "description": "S3 key prefix to filter Snowpipe ingest event notifications (optional)",
+                    "default": "",
+                },
+                "snowpipe_filter_suffix": {
+                    "type": "string",
+                    "description": "S3 key suffix to filter Snowpipe ingest event notifications, e.g. .json "
+                    "(optional)",
+                    "default": "",
+                },
                 "tags": {
                     "type": "object",
                     "description": "Additional key-value tags",
@@ -166,6 +197,10 @@ class LandingZoneTool(BaseTool):
         file_format_type: str = "JSON",
         create_access_keys: bool = False,
         schema_names: list[str] = None,
+        create_snowpipe: bool = False,
+        bronze_table_name: str = "",
+        snowpipe_filter_prefix: str = "",
+        snowpipe_filter_suffix: str = "",
         tags: dict = {},
         stack_overrides: dict | None = None,
         _action: str = "add",
@@ -174,6 +209,8 @@ class LandingZoneTool(BaseTool):
     ) -> str:
         if schema_names is None:
             schema_names = ["bronze", "silver", "gold", "platinum"]
+        if create_snowpipe and not bronze_table_name:
+            return "create_snowpipe requires bronze_table_name (the Bronze table Snowpipe will create and load into)."
         if stack_name and not _target_stack_names:
             _target_stack_names = [stack_name]
         stack_overrides = stack_overrides or {}
@@ -328,6 +365,18 @@ class LandingZoneTool(BaseTool):
                 )
             )
 
+            if create_snowpipe:
+                pipe_dir = env_dir / f"{name}-pipe"
+                os.makedirs(pipe_dir, exist_ok=True)
+                (pipe_dir / "terragrunt.hcl").write_text(
+                    templates.pipe_from_landing_zone(
+                        name=name,
+                        target_table=bronze_table_name,
+                        filter_prefix=snowpipe_filter_prefix,
+                        filter_suffix=snowpipe_filter_suffix,
+                    )
+                )
+
         any_create_access_keys = any(cfg["create_access_keys"] for cfg in resolved.values())
 
         verify_failures: list[str] = []
@@ -365,7 +414,7 @@ class LandingZoneTool(BaseTool):
         else:
             push_root = Path(tempfile.mkdtemp(prefix="lz-update-push-"))
             for env in stack_names:
-                for component in (f"{name}-db", f"{name}-db-arch", f"{name}-lz", f"{name}-si"):
+                for component in (f"{name}-db", f"{name}-db-arch", f"{name}-lz", f"{name}-si", f"{name}-pipe"):
                     src = upload_root / env / "landing-zone" / component
                     if src.exists():
                         dst = push_root / env / "landing-zone" / component
@@ -380,6 +429,8 @@ class LandingZoneTool(BaseTool):
                 stack_names=stack_names,
                 action=_action,
                 target_branch=target_branch,
+                create_snowpipe=create_snowpipe,
+                bronze_table_name=bronze_table_name,
             )
         finally:
             if push_root != upload_root:
@@ -395,6 +446,7 @@ class LandingZoneTool(BaseTool):
             f"      {name}-db-arch/\n"
             f"      {name}-lz/\n"
             f"      {name}-si/"
+            + (f"\n      {name}-pipe/" if create_snowpipe else "")
             for stack_name in stack_names
         )
         first_stack = stack_names[0]
@@ -412,13 +464,22 @@ class LandingZoneTool(BaseTool):
             for env in stack_names
         )
 
+        snowpipe_summary = (
+            f"Snowpipe:\n"
+            f"  Bronze table: {bronze_table_name} (RAW_DATA VARIANT, SOURCE_FILE, LOAD_TIMESTAMP — created by Terraform)\n"
+            f"  Filter:       prefix='{snowpipe_filter_prefix}' suffix='{snowpipe_filter_suffix}'\n\n"
+            if create_snowpipe else ""
+        )
+
         return (
             f"Landing zone ready at {upload_root}\n\n"
             f"{config_summary}\n\n"
+            f"{snowpipe_summary}"
             f"Structure:\n"
             f"  upload/{name}/\n"
             f"    modules/ (version {stacks[0].module_version})\n"
             f"      aws/landing-zone/\n"
+            f"      aws/snowflake-pipe/\n"
             f"      snowflake/database/\n"
             f"      snowflake/medallion-arch/\n"
             f"      snowflake/s3-storage-integration/\n"
@@ -440,6 +501,8 @@ class LandingZoneTool(BaseTool):
         stack_names: list[str],
         action: str = "add",
         target_branch: str | None = None,
+        create_snowpipe: bool = False,
+        bronze_table_name: str = "",
     ) -> str:
         record = await self._get_github_repo()
         if not record:
@@ -479,15 +542,25 @@ class LandingZoneTool(BaseTool):
             f"- **`{landing_zone_name}-db`** — Snowflake database\n"
             f"- **`{landing_zone_name}-db-arch`** — Medallion schemas\n"
             f"- **`{landing_zone_name}-lz`** — S3 bucket\n"
-            f"- **`{landing_zone_name}-si`** — Snowflake storage integration + external stage\n\n"
-            f"## Configuration\n\n"
+            f"- **`{landing_zone_name}-si`** — Snowflake storage integration + external stage\n"
+            + (
+                f"- **`{landing_zone_name}-pipe`** — Snowpipe auto-ingest into Bronze table "
+                f"`{bronze_table_name}` (`RAW_DATA VARIANT`, `SOURCE_FILE`, `LOAD_TIMESTAMP` — Terraform "
+                f"owns only this shape; Silver/Gold modeling from here is dbt's responsibility)\n"
+                if create_snowpipe else ""
+            )
+            + f"\n## Configuration\n\n"
             f"| Stack | Data classification | Retention policy | Data owner | Bucket | Schemas |\n"
             f"|---|---|---|---|---|---|\n"
             f"{config_table_rows}\n\n"
             f"## Test plan\n\n"
             f"- [ ] `terragrunt run-all validate` passes in `{stack_names[0]}/landing-zone`\n"
             f"- [ ] `terragrunt run-all plan` shows expected resources\n"
-            f"- [ ] Apply to earlier stacks before later ones (`{'` → `'.join(stack_names)}`)\n\n"
+            + (
+                f"- [ ] Drop a test file into the bucket and confirm it appears in `{bronze_table_name}`\n"
+                if create_snowpipe else ""
+            )
+            + f"- [ ] Apply to earlier stacks before later ones (`{'` → `'.join(stack_names)}`)\n\n"
             f"---\n"
             f"🤖 Generated by Canary"
         )

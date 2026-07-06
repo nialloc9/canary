@@ -13,6 +13,7 @@ MODULE_COMPONENTS = (
     "snowflake/database",
     "snowflake/medallion-arch",
     "snowflake/s3-storage-integration",
+    "aws/snowflake-pipe",
 )
 
 

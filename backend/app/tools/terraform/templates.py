@@ -34,38 +34,47 @@ inputs = merge(
   local.env_vars.locals,
 )
 
-generate "provider" {{
+generate "provider" {
   path      = "provider.tf"
   if_exists = "skip"
   contents  = <<-EOF
-    terraform {{
-      required_providers {{
-        aws = {{
+    terraform {
+      required_providers {
+        aws = {
           source  = "hashicorp/aws"
           version = "~> 5.0"
-        }}
-        snowflake = {{
+        }
+        snowflake = {
           source  = "Snowflake-Labs/snowflake"
           version = "~> 0.87"
-        }}
-        random = {{
+        }
+        random = {
           source  = "hashicorp/random"
           version = "~> 3.0"
-        }}
-        time = {{
+        }
+        time = {
           source  = "hashicorp/time"
           version = "~> 0.9"
-        }}
-      }}
-    }}
+        }
+      }
+    }
 
-    provider "aws" {{
-      region = "${{local.aws_region}}"
-    }}
+    provider "aws" {
+      region = "${local.aws_region}"
+    }
 
-    provider "snowflake" {{}}
+    provider "snowflake" {
+      preview_features_enabled = [
+        "snowflake_table_resource",
+        "snowflake_storage_integration_aws_resource",
+        "snowflake_storage_integration_resource",
+        "snowflake_file_format_resource",
+        "snowflake_stage_resource",
+        "snowflake_pipe_resource",
+      ]
+    }
   EOF
-}}
+}
 '''
 
 
@@ -398,49 +407,6 @@ def state_bootstrap_versions() -> str:
 '''
 
 
-def pipe(
-    name: str,
-    snowflake_database: str,
-    snowflake_schema: str,
-    target_table: str,
-    filter_prefix: str = "",
-    filter_suffix: str = "",
-) -> str:
-    optional_inputs = ""
-    if filter_prefix:
-        optional_inputs += f'\n  filter_prefix = "{filter_prefix}"'
-    if filter_suffix:
-        optional_inputs += f'\n  filter_suffix = "{filter_suffix}"'
-
-    return f'''include "base" {{
-  path = find_in_parent_folders()
-}}
-
-terraform {{
-  source = "${{get_parent_terragrunt_dir()}}/modules/aws/snowflake-pipe"
-}}
-
-dependency "lz" {{
-  config_path = "../{name}-lz"
-
-  mock_outputs = {{
-    bucket_id  = "MOCK_{name.upper().replace('-', '_')}_BUCKET"
-    stage_name = "MOCK_DB.MOCK_SCHEMA.MOCK_{name.upper().replace('-', '_')}_STAGE"
-  }}
-  mock_outputs_allowed_terraform_commands = ["validate", "plan"]
-}}
-
-inputs = {{
-  name               = "{name}"
-  bucket_id          = dependency.lz.outputs.bucket_id
-  snowflake_database = "{snowflake_database}"
-  snowflake_schema   = "{snowflake_schema}"
-  stage_fqn          = dependency.lz.outputs.stage_name
-  target_table       = "{target_table}"{optional_inputs}
-}}
-'''
-
-
 def lz(
     name: str,
     env: str,
@@ -545,5 +511,82 @@ inputs = {{
   snowflake_schema   = dependency.db_arch.outputs.landing_zone_schema_name
 
   file_format_type = "{file_format_type}"
+}}
+'''
+
+
+def pipe_from_landing_zone(
+    name: str,
+    target_table: str,
+    filter_prefix: str = "",
+    filter_suffix: str = "",
+) -> str:
+    """Snowpipe terragrunt config, used both inline by `create_landing_zone`
+    and standalone by `create_snowflake_pipe` (retrofitting an existing
+    landing zone). Always wires up to the sibling {name}-db/-db-arch/-lz/-si
+    components via dependency blocks rather than accepting literal database/
+    schema strings — those names are transformed by the db/medallion-arch
+    modules (uppercased, schema suffixed with its data classification), so
+    a hand-typed literal is one typo away from a Snowflake "object does not
+    exist" failure at apply time. Deriving them here means the pipe can
+    never drift out of sync with the landing zone it belongs to.
+    """
+    optional_inputs = ""
+    if filter_prefix:
+        optional_inputs += f'\n  filter_prefix = "{filter_prefix}"'
+    if filter_suffix:
+        optional_inputs += f'\n  filter_suffix = "{filter_suffix}"'
+
+    return f'''include "base" {{
+  path = find_in_parent_folders()
+}}
+
+terraform {{
+  source = "${{get_parent_terragrunt_dir()}}/modules/aws/snowflake-pipe"
+}}
+
+dependency "lz" {{
+  config_path = "../{name}-lz"
+
+  mock_outputs = {{
+    s3_bucket_name = "MOCK_{name.upper().replace('-', '_')}_BUCKET"
+  }}
+  mock_outputs_allowed_terraform_commands = ["validate", "plan"]
+}}
+
+dependency "db" {{
+  config_path = "../{name}-db"
+
+  mock_outputs = {{
+    name = "MOCK_{name.upper().replace('-', '_')}"
+  }}
+  mock_outputs_allowed_terraform_commands = ["validate", "plan"]
+}}
+
+dependency "db_arch" {{
+  config_path = "../{name}-db-arch"
+
+  mock_outputs = {{
+    landing_zone_schema_name = "MOCK_LANDING_ZONE"
+  }}
+  mock_outputs_allowed_terraform_commands = ["validate", "plan"]
+}}
+
+dependency "si" {{
+  config_path = "../{name}-si"
+
+  mock_outputs = {{
+    stage_name = "MOCK_DB.MOCK_SCHEMA.MOCK_{name.upper().replace('-', '_')}_STAGE"
+  }}
+  mock_outputs_allowed_terraform_commands = ["validate", "plan"]
+}}
+
+inputs = {{
+  name               = "{name}"
+  bucket_name        = dependency.lz.outputs.s3_bucket_name
+  snowflake_database = dependency.db.outputs.name
+  snowflake_schema   = dependency.db_arch.outputs.landing_zone_schema_name
+  stage_fqn          = dependency.si.outputs.stage_name
+  target_table       = "{target_table}"{optional_inputs}
 }}
 '''

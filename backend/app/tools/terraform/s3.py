@@ -1,5 +1,6 @@
 import os
 import shutil
+import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -36,7 +37,16 @@ class LandingZoneTool(BaseTool):
             "terragrunt configs for every stack configured on the account, with "
             "{name}-db, {name}-db-arch, and {name}-lz folders wired together via "
             "dependencies. Requires data classification, retention policy, and "
-            "data owner."
+            "data owner. "
+            "By default this applies to every stack configured on the account (e.g. dev AND "
+            "prod) — always pass stack_name when the request is scoped to one environment "
+            "(e.g. 'add this to prod', 'only in dev'), otherwise you will silently change "
+            "every other stack too, including ones that already have this landing zone "
+            "deployed. "
+            "When the user gives different instructions for different stacks in the same "
+            "request (e.g. 'prod should reuse bucket X, dev should create its own'), use "
+            "stack_overrides instead of separate calls — pass the fields common to all stacks "
+            "as top-level arguments and only the differing fields inside stack_overrides."
         )
 
     @property
@@ -47,6 +57,12 @@ class LandingZoneTool(BaseTool):
                 "name": {
                     "type": "string",
                     "description": "Project or data-source name (used in naming all resources)",
+                },
+                "stack_name": {
+                    "type": "string",
+                    "description": "Restrict this to a single stack (e.g. 'prod'). Required whenever "
+                    "the request is scoped to one environment. Omit only when the user explicitly wants "
+                    "this landing zone created on every stack on the account.",
                 },
                 "region": {
                     "type": "string",
@@ -114,6 +130,17 @@ class LandingZoneTool(BaseTool):
                     "description": "Additional key-value tags",
                     "default": {},
                 },
+                "stack_overrides": {
+                    "type": "object",
+                    "description": "Per-stack field overrides, keyed by stack name (e.g. "
+                    '{"dev": {"existing_s3_bucket_arn": ""}, "prod": {"existing_s3_bucket_arn": '
+                    '"arn:aws:s3:::..."}}). Only include the fields that differ for that stack — '
+                    "anything omitted falls back to the top-level value for that field. Supported "
+                    "keys: data_classification, retention_policy, data_owner, department, "
+                    "cost_center, existing_s3_bucket_arn, kms_key_arn, s3_stage_prefix, "
+                    "file_format_type, create_access_keys, schema_names.",
+                    "default": {},
+                },
             },
             "required": [
                 "name",
@@ -129,6 +156,7 @@ class LandingZoneTool(BaseTool):
         data_classification: str,
         retention_policy: str,
         data_owner: str,
+        stack_name: str | None = None,
         region: str = "eu-west-1",
         department: str = "none",
         cost_center: str = "none",
@@ -139,15 +167,16 @@ class LandingZoneTool(BaseTool):
         create_access_keys: bool = False,
         schema_names: list[str] = None,
         tags: dict = {},
+        stack_overrides: dict | None = None,
         _action: str = "add",
         _target_stack_names: list[str] | None = None,
+        _chat_branch: str | None = None,
     ) -> str:
         if schema_names is None:
             schema_names = ["bronze", "silver", "gold", "platinum"]
-
-        transition_to_ia_days, transition_to_glacier_days, expiration_days = (
-            self._lifecycle_days(retention_policy)
-        )
+        if stack_name and not _target_stack_names:
+            _target_stack_names = [stack_name]
+        stack_overrides = stack_overrides or {}
 
         upload_root = Path(__file__).resolve().parents[3] / "upload" / name
         shutil.rmtree(upload_root, ignore_errors=True)
@@ -203,6 +232,15 @@ class LandingZoneTool(BaseTool):
         }
         stack_names = [s.name for s in stacks]
 
+        # modules/ and the root/global/account HCL are still materialized
+        # locally below (needed for `terragrunt plan` if verify_before_pr is
+        # on) — but for _action == "update" only the touched landing zone's
+        # own terragrunt.hcl files ever get pushed to GitHub (see the
+        # `push_root` narrowing after generation, below). Bumping a stack's
+        # module version and re-vendoring is a separate, explicit action
+        # ("hard refresh modules"), not a side effect of an unrelated config
+        # edit — this guarantees an update can never change the vendored
+        # Terraform modules, only its own terragrunt config.
         if not (repo_record and repo_record.skip_module_import):
             # Modules land on whichever branch(es) this call targets and are
             # committed there — dev and prod naturally end up with independent
@@ -213,9 +251,29 @@ class LandingZoneTool(BaseTool):
         if not (repo_record and repo_record.skip_bootstrap):
             self._write_root_hcl(upload_root, name, region, tags)
 
-        schemas_hcl = ", ".join(f'"{s}"' for s in schema_names)
+        resolved: dict[str, dict] = {}
 
         for env in stack_names:
+            ov = stack_overrides.get(env, {})
+            cfg = {
+                "data_classification": ov.get("data_classification", data_classification),
+                "retention_policy": ov.get("retention_policy", retention_policy),
+                "data_owner": ov.get("data_owner", data_owner),
+                "department": ov.get("department", department),
+                "cost_center": ov.get("cost_center", cost_center),
+                "existing_s3_bucket_arn": ov.get("existing_s3_bucket_arn", existing_s3_bucket_arn),
+                "kms_key_arn": ov.get("kms_key_arn", kms_key_arn),
+                "s3_stage_prefix": ov.get("s3_stage_prefix", s3_stage_prefix),
+                "file_format_type": ov.get("file_format_type", file_format_type),
+                "create_access_keys": ov.get("create_access_keys", create_access_keys),
+                "schema_names": ov.get("schema_names", schema_names),
+            }
+            resolved[env] = cfg
+            transition_to_ia_days, transition_to_glacier_days, expiration_days = (
+                self._lifecycle_days(cfg["retention_policy"])
+            )
+            schemas_hcl = ", ".join(f'"{s}"' for s in cfg["schema_names"])
+
             sc = state_configs[env]
             env_top_dir = upload_root / env
             env_dir = env_top_dir / "landing-zone"
@@ -236,7 +294,7 @@ class LandingZoneTool(BaseTool):
             db_arch_dir = env_dir / f"{name}-db-arch"
             os.makedirs(db_arch_dir, exist_ok=True)
             (db_arch_dir / "terragrunt.hcl").write_text(
-                templates.db_arch(name, data_classification, schemas_hcl)
+                templates.db_arch(name, cfg["data_classification"], schemas_hcl)
             )
 
             lz_dir = env_dir / f"{name}-lz"
@@ -245,18 +303,18 @@ class LandingZoneTool(BaseTool):
                 templates.lz(
                     name=name,
                     env=env,
-                    data_classification=data_classification,
-                    retention_policy=retention_policy,
-                    data_owner=data_owner,
-                    department=department,
-                    cost_center=cost_center,
+                    data_classification=cfg["data_classification"],
+                    retention_policy=cfg["retention_policy"],
+                    data_owner=cfg["data_owner"],
+                    department=cfg["department"],
+                    cost_center=cfg["cost_center"],
                     project_code=project.name,
-                    create_access_keys=create_access_keys,
+                    create_access_keys=cfg["create_access_keys"],
                     transition_to_ia_days=transition_to_ia_days,
                     transition_to_glacier_days=transition_to_glacier_days,
                     expiration_days=expiration_days,
-                    existing_s3_bucket_arn=existing_s3_bucket_arn,
-                    kms_key_arn=kms_key_arn,
+                    existing_s3_bucket_arn=cfg["existing_s3_bucket_arn"],
+                    kms_key_arn=cfg["kms_key_arn"],
                 )
             )
 
@@ -265,10 +323,12 @@ class LandingZoneTool(BaseTool):
             (si_dir / "terragrunt.hcl").write_text(
                 templates.si(
                     name=name,
-                    s3_stage_prefix=s3_stage_prefix,
-                    file_format_type=file_format_type,
+                    s3_stage_prefix=cfg["s3_stage_prefix"],
+                    file_format_type=cfg["file_format_type"],
                 )
             )
+
+        any_create_access_keys = any(cfg["create_access_keys"] for cfg in resolved.values())
 
         verify_failures: list[str] = []
         for s in stacks:
@@ -289,26 +349,44 @@ class LandingZoneTool(BaseTool):
                 "stack(s) in Admin → Stacks."
             )
 
-        # A landing-zone PR normally targets the repo's account-level default
-        # branch — but each stack's content actually lives on that stack's own
-        # branch (e.g. dev -> develop, prod -> main). When this call is scoped
-        # to exactly one stack, target that stack's branch instead, so the PR
-        # actually lands where the stack's existing content already lives.
-        target_branch = stacks[0].branch if _target_stack_names and len(stacks) == 1 else None
+        # The PR always targets the branch of the stack the user is chatting
+        # from (e.g. dev -> develop), regardless of which stack(s) the config
+        # itself is for — content destined for prod still goes up for review
+        # on the dev branch first; promotion to prod's branch happens later
+        # via the separate release flow, not by pushing straight to it here.
+        target_branch = _chat_branch
 
-        github_section = await self._open_github_pr(
-            landing_zone_name=name,
-            upload_root=upload_root,
-            data_classification=data_classification,
-            retention_policy=retention_policy,
-            schema_names=schema_names,
-            stack_names=stack_names,
-            action=_action,
-            target_branch=target_branch,
-        )
+        # An update only ever pushes this landing zone's own terragrunt.hcl
+        # files — never modules/ or the shared root/global/account HCL that
+        # were regenerated into upload_root above purely so verification had
+        # a complete tree to plan against.
+        if _action == "add":
+            push_root = upload_root
+        else:
+            push_root = Path(tempfile.mkdtemp(prefix="lz-update-push-"))
+            for env in stack_names:
+                for component in (f"{name}-db", f"{name}-db-arch", f"{name}-lz", f"{name}-si"):
+                    src = upload_root / env / "landing-zone" / component
+                    if src.exists():
+                        dst = push_root / env / "landing-zone" / component
+                        os.makedirs(dst.parent, exist_ok=True)
+                        shutil.copytree(src, dst)
+
+        try:
+            github_section = await self._open_github_pr(
+                landing_zone_name=name,
+                upload_root=push_root,
+                stack_configs=resolved,
+                stack_names=stack_names,
+                action=_action,
+                target_branch=target_branch,
+            )
+        finally:
+            if push_root != upload_root:
+                shutil.rmtree(push_root, ignore_errors=True)
 
         access_keys_section = (
-            await self._access_keys_section(name, project.name, stacks) if create_access_keys else ""
+            await self._access_keys_section(name, project.name, stacks) if any_create_access_keys else ""
         )
 
         stack_structure = "\n".join(
@@ -321,12 +399,22 @@ class LandingZoneTool(BaseTool):
         )
         first_stack = stack_names[0]
 
+        config_summary = "\n".join(
+            f"  {env}:\n"
+            f"    Data classification: {resolved[env]['data_classification']}\n"
+            f"    Retention policy:    {resolved[env]['retention_policy']}\n"
+            f"    Data owner:          {resolved[env]['data_owner']}\n"
+            f"    Schemas:             {', '.join(resolved[env]['schema_names'])}"
+            + (
+                f"\n    Existing bucket:     {resolved[env]['existing_s3_bucket_arn']}"
+                if resolved[env]["existing_s3_bucket_arn"] else ""
+            )
+            for env in stack_names
+        )
+
         return (
             f"Landing zone ready at {upload_root}\n\n"
-            f"  Data classification: {data_classification}\n"
-            f"  Retention policy:    {retention_policy}\n"
-            f"  Data owner:          {data_owner}\n"
-            f"  Schemas:             {', '.join(schema_names)}\n\n"
+            f"{config_summary}\n\n"
             f"Structure:\n"
             f"  upload/{name}/\n"
             f"    modules/ (version {stacks[0].module_version})\n"
@@ -348,9 +436,7 @@ class LandingZoneTool(BaseTool):
         self,
         landing_zone_name: str,
         upload_root: Path,
-        data_classification: str,
-        retention_policy: str,
-        schema_names: list[str],
+        stack_configs: dict[str, dict],
         stack_names: list[str],
         action: str = "add",
         target_branch: str | None = None,
@@ -365,29 +451,39 @@ class LandingZoneTool(BaseTool):
 
         commit_message = (
             f"{conv_type}(landing-zone): {action} {landing_zone_name} landing zone\n\n"
-            f"- Data classification: {data_classification}\n"
-            f"- Retention policy: {retention_policy}\n"
-            f"- Schemas: {', '.join(schema_names)}\n"
-            f"- Stacks: {', '.join(stack_names)}"
+            + "\n".join(
+                f"- {env}: {stack_configs[env]['data_classification']}, "
+                f"{stack_configs[env]['retention_policy']}, "
+                f"owner={stack_configs[env]['data_owner']}"
+                + (
+                    f", bucket={stack_configs[env]['existing_s3_bucket_arn']}"
+                    if stack_configs[env]["existing_s3_bucket_arn"] else ""
+                )
+                for env in stack_names
+            )
         )
 
         pr_title = f"{conv_type}(landing-zone): {action} {landing_zone_name} landing zone"
 
         summary_verb = "Adds" if action == "add" else "Updates"
+        config_table_rows = "\n".join(
+            f"| `{env}` | `{stack_configs[env]['data_classification']}` | "
+            f"`{stack_configs[env]['retention_policy']}` | {stack_configs[env]['data_owner']} | "
+            f"{stack_configs[env]['existing_s3_bucket_arn'] or '_new bucket_'} | "
+            f"{', '.join(f'`{s}`' for s in stack_configs[env]['schema_names'])} |"
+            for env in stack_names
+        )
         pr_body = (
             f"## Summary\n\n"
             f"{summary_verb} the landing zone for `{landing_zone_name}`.\n\n"
             f"- **`{landing_zone_name}-db`** — Snowflake database\n"
-            f"- **`{landing_zone_name}-db-arch`** — Medallion schemas "
-            f"({', '.join(f'`{s}`' for s in schema_names)})\n"
+            f"- **`{landing_zone_name}-db-arch`** — Medallion schemas\n"
             f"- **`{landing_zone_name}-lz`** — S3 bucket\n"
             f"- **`{landing_zone_name}-si`** — Snowflake storage integration + external stage\n\n"
             f"## Configuration\n\n"
-            f"| Setting | Value |\n"
-            f"|---|---|\n"
-            f"| Data classification | `{data_classification}` |\n"
-            f"| Retention policy | `{retention_policy}` |\n"
-            f"| Stacks | {', '.join(f'`{s}`' for s in stack_names)} |\n\n"
+            f"| Stack | Data classification | Retention policy | Data owner | Bucket | Schemas |\n"
+            f"|---|---|---|---|---|---|\n"
+            f"{config_table_rows}\n\n"
             f"## Test plan\n\n"
             f"- [ ] `terragrunt run-all validate` passes in `{stack_names[0]}/landing-zone`\n"
             f"- [ ] `terragrunt run-all plan` shows expected resources\n"

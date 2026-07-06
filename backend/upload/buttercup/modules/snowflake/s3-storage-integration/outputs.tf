@@ -5,7 +5,7 @@ output "iam_role_arn" {
 
 output "storage_integration_name" {
   description = "Name of the Snowflake storage integration."
-  value       = snowflake_storage_integration.s3.name
+  value       = snowflake_storage_integration_aws.s3.name
 }
 
 output "stage_name" {
@@ -15,11 +15,11 @@ output "stage_name" {
 
 output "aws_iam_user_arn" {
   description = "Snowflake's IAM user ARN (add to the IAM role trust policy)."
-  value       = snowflake_storage_integration.s3.storage_aws_iam_user_arn
+  value       = snowflake_storage_integration_aws.s3.describe_output[0].iam_user_arn
 }
 
 output "aws_external_id" {
   description = "Snowflake's external ID (add to the IAM role trust policy)."
-  value       = snowflake_storage_integration.s3.describe_output[0].storage_aws_external_id[0].value
+  value       = snowflake_storage_integration_aws.s3.describe_output[0].external_id
   sensitive   = true
 }

@@ -1,3 +1,4 @@
+import inspect
 import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -39,8 +40,11 @@ class ChatService:
         await self._persist_message(conversation.id, "user", user_message)
 
         history = await self._build_history(conversation.id)
-        system_prompt = await self._build_system_prompt(account_id, conversation.stack_id)
-        reply, tool_calls_log = await self._run(history, system_prompt)
+        chat_stack = await self._get_stack(account_id, conversation.stack_id)
+        system_prompt = self._build_system_prompt(chat_stack)
+        reply, tool_calls_log = await self._run(
+            history, system_prompt, chat_stack.branch if chat_stack else None
+        )
 
         await self._persist_message(conversation.id, "assistant", reply, tool_calls_log)
         await self.db.commit()
@@ -51,7 +55,9 @@ class ChatService:
             "tool_calls": tool_calls_log or None,
         }
 
-    async def _run(self, history: list[dict], system_prompt: str | None) -> tuple[str, list[dict]]:
+    async def _run(
+        self, history: list[dict], system_prompt: str | None, chat_branch: str | None = None
+    ) -> tuple[str, list[dict]]:
         """
         Send messages to the model. If it calls a tool, execute it and
         loop back until it returns a final text response.
@@ -76,7 +82,13 @@ class ChatService:
                 if tool is None:
                     output = f"Error: tool '{call.name}' not found"
                 else:
-                    output = await tool.execute(**call.input)
+                    kwargs = dict(call.input)
+                    if "_chat_branch" in inspect.signature(tool.execute).parameters:
+                        kwargs["_chat_branch"] = chat_branch
+                    try:
+                        output = await tool.execute(**kwargs)
+                    except Exception as exc:
+                        output = f"Error: tool '{call.name}' failed — {exc}"
 
                 tool_calls_log.append({
                     "tool": call.name,
@@ -112,14 +124,15 @@ class ChatService:
         await self.db.flush()
         return conv
 
-    async def _build_system_prompt(self, account_id: str, stack_id: str | None) -> str | None:
+    async def _get_stack(self, account_id: str, stack_id: str | None) -> Stack | None:
         if not stack_id:
             return None
-
         result = await self.db.execute(
             select(Stack).where(Stack.id == stack_id, Stack.account_id == account_id)
         )
-        stack = result.scalar_one_or_none()
+        return result.scalar_one_or_none()
+
+    def _build_system_prompt(self, stack: Stack | None) -> str | None:
         if not stack:
             return None
 

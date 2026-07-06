@@ -4,6 +4,8 @@ from app.tools.base import BaseTool
 from app.tools.terraform.s3 import LandingZoneTool
 from app.tools.terraform.snowflake_pipe import SnowflakePipeTool
 from app.tools.terraform.update import UpdateLandingZoneTool
+from app.tools.terraform.remove import RemoveTerragruntBlockTool
+from app.tools.terraform.blocks import ListTerragruntBlocksTool, ReadTerragruntBlockTool, EditTerragruntBlockTool
 from app.tools.terraform.status import CheckDeployedInfrastructureTool
 from app.tools.terraform.access_keys import GetLandingZoneAccessKeysTool
 
@@ -16,6 +18,10 @@ class ToolRegistry:
     def _register_defaults(self, db: AsyncSession, account_id: str) -> None:
         self.register(LandingZoneTool(db, account_id))
         self.register(UpdateLandingZoneTool(db, account_id))
+        self.register(RemoveTerragruntBlockTool(db, account_id))
+        self.register(ListTerragruntBlocksTool(db, account_id))
+        self.register(ReadTerragruntBlockTool(db, account_id))
+        self.register(EditTerragruntBlockTool(db, account_id))
         self.register(SnowflakePipeTool(db, account_id))
         self.register(CheckDeployedInfrastructureTool(db, account_id))
         self.register(GetLandingZoneAccessKeysTool(db, account_id))

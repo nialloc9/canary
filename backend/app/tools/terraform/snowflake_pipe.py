@@ -88,6 +88,7 @@ class SnowflakePipeTool(BaseTool):
         stack_name: str | None = None,
         filter_prefix: str = "",
         filter_suffix: str = "",
+        _chat_branch: str | None = None,
     ) -> str:
         all_stacks_result = await self._db.execute(
             select(Stack).where(Stack.account_id == self._account_id).order_by(Stack.sort_order)
@@ -103,7 +104,10 @@ class SnowflakePipeTool(BaseTool):
         else:
             stacks = all_stacks
         stack_names = [s.name for s in stacks]
-        target_branch = stacks[0].branch if stack_name and len(stacks) == 1 else None
+        # The PR always targets the branch of the stack the user is chatting
+        # from, regardless of which stack(s) the pipe itself is for — see
+        # the equivalent comment in LandingZoneTool.execute.
+        target_branch = _chat_branch
 
         with tempfile.TemporaryDirectory() as staging:
             staging_path = Path(staging)
@@ -171,9 +175,9 @@ class SnowflakePipeTool(BaseTool):
         if not repo:
             return None  # no repo connected yet — _open_pr will report that clearly
 
-        # Each stack's content actually lives on that stack's own branch (e.g.
-        # dev -> develop) — only fall back to the repo's account-level default
-        # when verifying across multiple stacks with potentially different branches.
+        # Verify against the same branch the PR will target — the chat stack's
+        # branch, falling back to the repo's account-level default outside a
+        # chat context (e.g. direct API calls).
         clone_branch = target_branch or repo.branch
 
         clone_dir = tempfile.mkdtemp(prefix="pipe-verify-")

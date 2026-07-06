@@ -123,9 +123,18 @@ export interface ModuleRefreshResult {
   message: string | null
 }
 
+export interface ReleaseConflict {
+  path: string
+  ours: string | null
+  theirs: string | null
+}
+
 export interface ReleaseResult {
   pr_urls: string[]
   branch: string | null
+  conflicts?: ReleaseConflict[] | null
+  source_branch?: string | null
+  target_branch?: string | null
 }
 
 export type TopologyNodeType =
@@ -473,9 +482,13 @@ export const api = {
     return request(`/stacks/${id}/refresh-modules`, { method: 'POST' })
   },
 
-  releaseStack(id: string, target: 'prod' | 'develop'): Promise<ReleaseResult> {
-    if (config.mockApi) return mockApi.releaseStack(id, target)
-    return request(`/stacks/${id}/release`, { method: 'POST', body: JSON.stringify({ target }) })
+  releaseStack(
+    id: string,
+    target: 'prod' | 'develop',
+    resolutions?: Record<string, 'ours' | 'theirs'>
+  ): Promise<ReleaseResult> {
+    if (config.mockApi) return mockApi.releaseStack(id, target, resolutions)
+    return request(`/stacks/${id}/release`, { method: 'POST', body: JSON.stringify({ target, resolutions }) })
   },
 
   getStackTopology(id: string, refresh = false): Promise<Topology> {

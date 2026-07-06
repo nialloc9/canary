@@ -253,7 +253,7 @@ export const mockApi = {
     return mockStacks.map(s => ({ ...s }))
   },
 
-  async releaseStack(id: string, target: 'prod' | 'develop'): Promise<ReleaseResult> {
+  async releaseStack(id: string, target: 'prod' | 'develop', _resolutions?: Record<string, 'ours' | 'theirs'>): Promise<ReleaseResult> {
     await delay(1500)
     const stack = mockStacks.find(s => s.id === id)
     if (!stack) throw new Error('Stack not found')

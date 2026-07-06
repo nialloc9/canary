@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, FormEvent, KeyboardEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { api, ChatResponse, ConversationOut, StackOut, ReleaseResult, ProjectOut } from '../api/client'
+import { api, ChatResponse, ConversationOut, StackOut, ReleaseResult, ReleaseConflict, ProjectOut } from '../api/client'
 import { AppLayout } from '../components/AppLayout'
 import { Button } from '../components/ui/button'
 import { Textarea } from '../components/ui/textarea'
@@ -42,6 +42,10 @@ export function ChatPage() {
   const [releasing, setReleasing] = useState(false)
   const [releaseResult, setReleaseResult] = useState<ReleaseResult | null>(null)
   const [releaseError, setReleaseError] = useState('')
+  const [releaseTarget, setReleaseTarget] = useState<'prod' | 'develop'>('prod')
+  const [conflicts, setConflicts] = useState<ReleaseConflict[] | null>(null)
+  const [conflictChoices, setConflictChoices] = useState<Record<string, 'ours' | 'theirs'>>({})
+  const [resolving, setResolving] = useState(false)
   const [showTopology, setShowTopology] = useState(false)
   const [projects, setProjects] = useState<ProjectOut[]>([])
   const [editingConvId, setEditingConvId] = useState<string | undefined>()
@@ -62,6 +66,8 @@ export function ChatPage() {
     setReleaseStep('idle')
     setReleaseResult(null)
     setReleaseError('')
+    setConflicts(null)
+    setConflictChoices({})
     setShowTopology(false)
   }, [selectedStackId])
 
@@ -87,13 +93,40 @@ export function ChatPage() {
     setReleasing(true)
     setReleaseError('')
     setReleaseResult(null)
+    setConflicts(null)
+    setReleaseTarget(target)
     try {
       const result = await api.releaseStack(selectedStackId, target)
-      setReleaseResult(result)
+      if (result.conflicts && result.conflicts.length > 0) {
+        setConflicts(result.conflicts)
+        setConflictChoices(Object.fromEntries(result.conflicts.map(c => [c.path, 'ours' as const])))
+      } else {
+        setReleaseResult(result)
+      }
     } catch (e) {
       setReleaseError(e instanceof Error ? e.message : 'Release failed')
     }
     setReleasing(false)
+  }
+
+  async function resolveConflicts() {
+    if (!selectedStackId || !conflicts) return
+    setResolving(true)
+    setReleaseError('')
+    try {
+      const result = await api.releaseStack(selectedStackId, releaseTarget, conflictChoices)
+      if (result.conflicts && result.conflicts.length > 0) {
+        // Resolutions were incomplete or something changed upstream — show the fresh set.
+        setConflicts(result.conflicts)
+        setConflictChoices(Object.fromEntries(result.conflicts.map(c => [c.path, 'ours' as const])))
+      } else {
+        setConflicts(null)
+        setReleaseResult(result)
+      }
+    } catch (e) {
+      setReleaseError(e instanceof Error ? e.message : 'Failed to resolve conflicts')
+    }
+    setResolving(false)
   }
 
   useEffect(() => {
@@ -509,6 +542,77 @@ export function ChatPage() {
 
         {releasing && (
           <p className="max-w-2xl mx-auto mb-2 text-xs text-muted-foreground">Releasing…</p>
+        )}
+
+        {conflicts && conflicts.length > 0 && (
+          <div className="max-w-2xl mx-auto mb-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3.5 space-y-3">
+            <div>
+              <p className="text-sm font-medium text-amber-700 dark:text-amber-400">
+                {conflicts.length === 1 ? '1 file needs' : `${conflicts.length} files need`} manual resolution
+              </p>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                These couldn't be auto-merged (e.g. one side deleted a file the other modified). Pick which
+                version should win for each, then confirm.
+              </p>
+            </div>
+
+            <div className="max-h-[45vh] overflow-y-auto space-y-2 pr-1 -mr-1">
+              {conflicts.map(c => (
+                <div key={c.path} className="rounded-md border border-border/50 bg-background/60 p-2.5 space-y-2">
+                  <p className="text-xs font-mono font-medium">{c.path}</p>
+                  <div className="grid grid-cols-2 gap-2 text-[11px]">
+                    <label className={`flex flex-col gap-1 rounded border p-2 cursor-pointer transition-colors ${
+                      conflictChoices[c.path] === 'ours' ? 'border-primary/60 bg-primary/8' : 'border-border/40 hover:bg-muted/30'
+                    }`}>
+                      <span className="flex items-center gap-1.5 font-medium">
+                        <input
+                          type="radio"
+                          name={`conflict-${c.path}`}
+                          checked={conflictChoices[c.path] === 'ours'}
+                          onChange={() => setConflictChoices(cc => ({ ...cc, [c.path]: 'ours' }))}
+                        />
+                        Keep prod's version
+                      </span>
+                      <pre className="whitespace-pre-wrap break-all text-muted-foreground max-h-32 overflow-y-auto">
+                        {c.ours ?? '(prod deleted this file)'}
+                      </pre>
+                    </label>
+                    <label className={`flex flex-col gap-1 rounded border p-2 cursor-pointer transition-colors ${
+                      conflictChoices[c.path] === 'theirs' ? 'border-primary/60 bg-primary/8' : 'border-border/40 hover:bg-muted/30'
+                    }`}>
+                      <span className="flex items-center gap-1.5 font-medium">
+                        <input
+                          type="radio"
+                          name={`conflict-${c.path}`}
+                          checked={conflictChoices[c.path] === 'theirs'}
+                          onChange={() => setConflictChoices(cc => ({ ...cc, [c.path]: 'theirs' }))}
+                        />
+                        Keep {selectedStack?.name ?? 'source'}'s version
+                      </span>
+                      <pre className="whitespace-pre-wrap break-all text-muted-foreground max-h-32 overflow-y-auto">
+                        {c.theirs ?? `(${selectedStack?.name ?? 'source'} deleted this file)`}
+                      </pre>
+                    </label>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="flex gap-2">
+              <Button size="sm" onClick={resolveConflicts} disabled={resolving} className="shadow-md shadow-primary/20">
+                {resolving ? 'Resolving…' : 'Resolve & continue'}
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => { setConflicts(null); setConflictChoices({}) }}
+                disabled={resolving}
+                className="border-border/60"
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
         )}
 
         {releaseResult && (

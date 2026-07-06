@@ -12,12 +12,12 @@ resource "aws_iam_role" "snowflake_integration" {
         Sid    = "SnowflakeAssumeRole"
         Effect = "Allow"
         Principal = {
-          AWS = snowflake_storage_integration.s3.storage_aws_iam_user_arn
+          AWS = snowflake_storage_integration_aws.s3.describe_output[0].iam_user_arn
         }
         Action = "sts:AssumeRole"
         Condition = {
           StringEquals = {
-            "sts:ExternalId" = snowflake_storage_integration.s3.describe_output[0].storage_aws_external_id[0].value
+            "sts:ExternalId" = snowflake_storage_integration_aws.s3.describe_output[0].external_id
           }
         }
       }
@@ -62,9 +62,8 @@ resource "aws_iam_role_policy" "snowflake_s3" {
 # Snowflake Storage Integration
 ###############################################################################
 
-resource "snowflake_storage_integration" "s3" {
+resource "snowflake_storage_integration_aws" "s3" {
   name    = upper("${replace(var.name, "-", "_")}_S3_INTEGRATION")
-  type    = "EXTERNAL_STAGE"
   enabled = true
 
   storage_provider     = "S3"
@@ -73,6 +72,29 @@ resource "snowflake_storage_integration" "s3" {
   storage_allowed_locations = ["s3://${var.s3_bucket_name}/"]
 
   comment = "Private Link storage integration for ${var.name}"
+}
+
+# Snowflake takes a few seconds to propagate a newly created storage
+# integration internally — referencing it from a stage in the same apply
+# (before that propagation finishes) fails with "Integration ... cannot be
+# found" even though the integration was just created successfully.
+#
+# `triggers` is required, not optional: without it this only waits the
+# *first* time the integration is ever created. If the integration is later
+# replaced (e.g. someone deletes it in Snowflake directly and Terraform
+# recreates it — exactly what "Marking the resource as removed" in a plan
+# means), this resource has no config change of its own and Terraform
+# leaves it alone, so the dependent stage gets no delay on that later
+# recreate and hits the same race again. Tying `triggers` to the
+# integration's id forces this to be replaced (and wait again) every time
+# the integration is.
+resource "time_sleep" "wait_for_storage_integration" {
+  depends_on      = [snowflake_storage_integration_aws.s3]
+  create_duration = "30s"
+
+  triggers = {
+    storage_integration_id = snowflake_storage_integration_aws.s3.id
+  }
 }
 
 ###############################################################################
@@ -87,10 +109,12 @@ resource "snowflake_file_format" "this" {
 }
 
 resource "snowflake_stage" "s3" {
+  depends_on = [time_sleep.wait_for_storage_integration]
+
   name                = upper("${replace(var.name, "-", "_")}_S3_STAGE")
   database            = var.snowflake_database
   schema              = var.snowflake_schema
-  storage_integration = snowflake_storage_integration.s3.name
+  storage_integration = snowflake_storage_integration_aws.s3.name
   url                 = "s3://${var.s3_bucket_name}/${var.s3_stage_prefix}"
 
   comment = "External stage for ${var.name}"

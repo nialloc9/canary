@@ -102,6 +102,7 @@ class ConnectionTestResult(BaseModel):
 
 class ReleaseRequest(BaseModel):
     target: Literal["prod", "develop"]
+    resolutions: dict[str, Literal["ours", "theirs"]] | None = None
 
 
 class TopologyNodeOut(BaseModel):
@@ -131,9 +132,18 @@ class TopologyOut(BaseModel):
     skipped: list[TopologySkippedOut] = []
 
 
+class ConflictOut(BaseModel):
+    path: str
+    ours: str | None
+    theirs: str | None
+
+
 class ReleaseResponse(BaseModel):
-    pr_urls: list[str]
+    pr_urls: list[str] = []
     branch: str | None = None
+    conflicts: list[ConflictOut] | None = None
+    source_branch: str | None = None
+    target_branch: str | None = None
 
 
 class AccessKeysOut(BaseModel):

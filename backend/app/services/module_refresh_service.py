@@ -1,13 +1,12 @@
 import os
 import shutil
-import subprocess
-import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
 from app.models.project import GitHubRepo
 from app.models.stack import Stack
+from app.services.git_ops import clone_repo, has_changes, commit_and_push, GitOpsError
 from app.services.github_service import GitHubService, GitHubError
 from app.services.module_versions_service import MODULE_COMPONENTS, module_source_dir
 
@@ -28,9 +27,12 @@ async def hard_refresh_modules(repo: GitHubRepo, stack: Stack) -> ModuleRefreshR
     re-copy them fresh from the stack's pinned module_version, opening a PR
     with both the deletions and the additions. Returns pr_url=None if the
     stack's modules/ already matches that version exactly (nothing to push)."""
-    clone_dir = tempfile.mkdtemp(prefix="modules-refresh-")
+    clone_dir = None
     try:
-        _clone(repo, clone_dir, stack.branch)
+        try:
+            clone_dir = clone_repo(repo.token, repo.repo_full_name, stack.branch)
+        except GitOpsError as exc:
+            raise ModuleRefreshError(str(exc)) from exc
 
         base_path = repo.infrastructure_base_path.strip("/")
         base = (Path(clone_dir) / base_path) if base_path else Path(clone_dir)
@@ -50,12 +52,18 @@ async def hard_refresh_modules(repo: GitHubRepo, stack: Stack) -> ModuleRefreshR
             shutil.copytree(src, dst, dirs_exist_ok=True)
             added_count += sum(1 for p in dst.rglob("*") if p.is_file())
 
-        if not _has_changes(clone_dir):
+        if not has_changes(clone_dir):
             return ModuleRefreshResult(pr_url=None, files_removed=0, files_added=0)
 
         slug = datetime.now().strftime("%Y%m%d-%H%M%S")
         feature_branch = f"chore/modules-hard-refresh-{stack.name}-{slug}"
-        _commit_and_push(clone_dir, feature_branch, stack.module_version, stack.name)
+        try:
+            commit_and_push(
+                clone_dir, feature_branch,
+                f"chore(modules): hard refresh to {stack.module_version} ({stack.name})",
+            )
+        except GitOpsError as exc:
+            raise ModuleRefreshError(str(exc)) from exc
 
         svc = GitHubService(
             token=repo.token,
@@ -84,41 +92,5 @@ async def hard_refresh_modules(repo: GitHubRepo, stack: Stack) -> ModuleRefreshR
 
         return ModuleRefreshResult(pr_url=pr_url, files_removed=removed_count, files_added=added_count)
     finally:
-        shutil.rmtree(clone_dir, ignore_errors=True)
-
-
-def _clone(repo: GitHubRepo, clone_dir: str, branch: str) -> None:
-    clone_url = f"https://{repo.token}@github.com/{repo.repo_full_name}.git"
-    try:
-        subprocess.run(
-            ["git", "clone", "--depth", "1", "--branch", branch, clone_url, clone_dir],
-            check=True,
-            capture_output=True,
-        )
-    except subprocess.CalledProcessError as exc:
-        raise ModuleRefreshError(
-            f"Failed to clone {repo.repo_full_name} (branch '{branch}'): {exc.stderr.decode(errors='replace')}"
-        ) from exc
-
-
-def _has_changes(clone_dir: str) -> bool:
-    result = subprocess.run(
-        ["git", "status", "--porcelain"], cwd=clone_dir, check=True, capture_output=True, text=True,
-    )
-    return bool(result.stdout.strip())
-
-
-def _commit_and_push(clone_dir: str, feature_branch: str, version: str, stack_name: str) -> None:
-    try:
-        subprocess.run(["git", "checkout", "-b", feature_branch], cwd=clone_dir, check=True, capture_output=True)
-        subprocess.run(["git", "add", "-A"], cwd=clone_dir, check=True, capture_output=True)
-        subprocess.run(
-            [
-                "git", "-c", "user.email=canary@pensievetechnologies.com", "-c", "user.name=Canary",
-                "commit", "-m", f"chore(modules): hard refresh to {version} ({stack_name})",
-            ],
-            cwd=clone_dir, check=True, capture_output=True,
-        )
-        subprocess.run(["git", "push", "origin", feature_branch], cwd=clone_dir, check=True, capture_output=True)
-    except subprocess.CalledProcessError as exc:
-        raise ModuleRefreshError(f"Git push failed: {exc.stderr.decode(errors='replace')}") from exc
+        if clone_dir:
+            shutil.rmtree(clone_dir, ignore_errors=True)

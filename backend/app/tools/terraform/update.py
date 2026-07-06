@@ -55,7 +55,14 @@ class UpdateLandingZoneTool(BaseTool):
             "By default this applies the change to every stack (e.g. dev AND prod) — always pass "
             "stack_name when the user's request is specific to one environment (e.g. 'only in dev', "
             "'prod should stay the same', 'just for staging'), otherwise you will silently change "
-            "every other stack too."
+            "every other stack too. This only ever touches this landing zone's own terragrunt.hcl "
+            "config — it never changes the vendored Terraform modules (use a module version bump "
+            "plus a hard-refresh for that). "
+            "Requires confirmation: call once with confirm omitted (or false) to get a plain-language "
+            "preview of exactly what will change — show that to the user verbatim and wait for them "
+            "to explicitly confirm in their next message. Only call again with confirm=true, passing "
+            "the exact same arguments as the preview call, after the user has clearly agreed. Never "
+            "set confirm=true on the first call."
         )
 
     @property
@@ -97,6 +104,12 @@ class UpdateLandingZoneTool(BaseTool):
                     "type": "boolean",
                     "description": "Create an IAM user with access keys for direct S3 access to this landing zone's bucket.",
                 },
+                "confirm": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Leave false (or omit) to preview the change without opening a PR. Only "
+                    "set true after the user has explicitly confirmed the preview.",
+                },
             },
             "required": ["name"],
         }
@@ -114,6 +127,8 @@ class UpdateLandingZoneTool(BaseTool):
         file_format_type: str | None = None,
         schema_names: list[str] | None = None,
         create_access_keys: bool | None = None,
+        confirm: bool = False,
+        _chat_branch: str | None = None,
     ) -> str:
         repo = await self._get_github_repo()
         if not repo:
@@ -180,6 +195,25 @@ class UpdateLandingZoneTool(BaseTool):
         }
         merged = {**current, **patch}
 
+        if not patch:
+            return f"No fields were specified to change on landing zone '{name}' — nothing to do."
+
+        if not confirm:
+            changes = "\n".join(
+                f"  {field}: {current.get(field)!r} → {value!r}"
+                for field, value in patch.items()
+                if current.get(field) != value
+            )
+            if not changes:
+                return f"Landing zone '{name}' already matches the requested config — nothing to change."
+            return (
+                f"This will update landing zone '{name}' on {stack_name or 'every stack'}:\n\n"
+                f"{changes}\n\n"
+                "This only rewrites this landing zone's own terragrunt.hcl files — it will not touch "
+                "the vendored Terraform modules or any other landing zone.\n\n"
+                "Reply to confirm and I'll open the PR."
+            )
+
         # Import here to avoid circular imports
         from app.tools.terraform.s3 import LandingZoneTool
         tool = LandingZoneTool(self._db, self._account_id)
@@ -196,6 +230,7 @@ class UpdateLandingZoneTool(BaseTool):
             create_access_keys=merged.get("create_access_keys", False),
             _action="update",
             _target_stack_names=[stack_name] if stack_name else None,
+            _chat_branch=_chat_branch,
         )
 
     # ------------------------------------------------------------------

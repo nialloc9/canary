@@ -28,10 +28,11 @@ from app.schemas.stack import (
     AccessKeysOut,
     ModuleVersionOut,
     ModuleRefreshResponse,
+    ConflictOut,
 )
 from app.services.branch_lookup import get_dev_prod_branches
 from app.services.github_service import GitHubService, GitHubError
-from app.services.release_service import release_stack, ReleaseError
+from app.services.release_service import release_stack, ReleaseError, ReleaseConflictError
 from app.services.topology_service import get_stack_topology
 from app.services.aws_secrets_service import get_landing_zone_access_keys
 from app.services.module_versions_service import list_module_versions, latest_module_version, module_version_exists
@@ -441,7 +442,15 @@ async def release(
 ):
     record = await _get_stack_or_404(db, account_id, stack_id)
     try:
-        result = await release_stack(db, account_id, record.name, payload.target)
+        result = await release_stack(
+            db, account_id, record.name, payload.target, resolutions=payload.resolutions
+        )
+    except ReleaseConflictError as exc:
+        return ReleaseResponse(
+            conflicts=[ConflictOut(path=c.path, ours=c.ours, theirs=c.theirs) for c in exc.conflicts],
+            source_branch=exc.source_branch,
+            target_branch=exc.target_branch,
+        )
     except ReleaseError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     return ReleaseResponse(pr_urls=result.pr_urls, branch=result.branch)

@@ -8,6 +8,7 @@ from app.tools.terraform.remove import RemoveTerragruntBlockTool
 from app.tools.terraform.blocks import ListTerragruntBlocksTool, ReadTerragruntBlockTool, EditTerragruntBlockTool
 from app.tools.terraform.status import CheckDeployedInfrastructureTool
 from app.tools.terraform.access_keys import GetLandingZoneAccessKeysTool
+from app.tools.dbt.staging_model import CreateDbtStagingModelTool
 
 
 class ToolRegistry:
@@ -25,6 +26,7 @@ class ToolRegistry:
         self.register(SnowflakePipeTool(db, account_id))
         self.register(CheckDeployedInfrastructureTool(db, account_id))
         self.register(GetLandingZoneAccessKeysTool(db, account_id))
+        self.register(CreateDbtStagingModelTool(db, account_id))
 
     def register(self, tool: BaseTool) -> None:
         self._tools[tool.name] = tool

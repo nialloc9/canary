@@ -14,7 +14,8 @@ from app.models.project import GitHubRepo, Project
 from app.models.stack import Stack, StackStateBackend
 from app.services.github_service import GitHubService, GitHubError
 from app.services.aws_secrets_service import get_landing_zone_access_keys
-from app.services.module_versions_service import MODULE_COMPONENTS, module_source_dir
+from app.services.module_versions_service import module_source_dir, stack_components
+from app.services.data_profile_service import infer_profile, upsert_profile
 
 
 class LandingZoneTool(BaseTool):
@@ -42,6 +43,13 @@ class LandingZoneTool(BaseTool):
             "create_snowpipe=true with a bronze_table_name and this adds a {name}-pipe "
             "component wired to this landing zone's own bucket/database/schema/stage, "
             "creating the Bronze table and loading files into it automatically. "
+            "Before calling this, ask the user to describe the data that will land here and to paste in "
+            "at least one representative sample file's content (sample_files, minimum 1) — file format, "
+            "size expectations, and per-column details are all inferred from the sample(s) automatically "
+            "if not given explicitly, and get stored against this landing zone so they never have to be "
+            "asked again later (e.g. when generating dbt models from this data). Ask about individual "
+            "columns too if the user has useful context to add (what each field means, valid value ranges) "
+            "— pass it via columns, but it's optional; anything not supplied is inferred from the samples. "
             "By default this applies to every stack configured on the account (e.g. dev AND "
             "prod) — always pass stack_name when the request is scoped to one environment "
             "(e.g. 'add this to prod', 'only in dev'), otherwise you will silently change "
@@ -114,9 +122,62 @@ class LandingZoneTool(BaseTool):
                 },
                 "file_format_type": {
                     "type": "string",
-                    "description": "Snowflake file format type",
+                    "description": "Snowflake file format type. If omitted, inferred from sample_files "
+                    "(falls back to JSON if it can't be determined).",
                     "enum": ["JSON", "CSV", "PARQUET", "AVRO", "ORC", "XML"],
-                    "default": "JSON",
+                },
+                "sample_files": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "filename": {"type": "string"},
+                            "content": {"type": "string"},
+                        },
+                        "required": ["content"],
+                    },
+                    "description": "At least one representative sample of the data that will land here — "
+                    "paste its raw content (as text; binary formats like PARQUET/AVRO/ORC can't be inferred "
+                    "this way, just describe them instead). Used to infer file_format_type, size stats, "
+                    "description, and columns for anything not supplied explicitly. Ask the user for this "
+                    "before calling the tool — it's required, not optional.",
+                },
+                "data_description": {
+                    "type": "string",
+                    "description": "Plain-language description of what this data represents (e.g. "
+                    "'Shopify order-created webhook events'). If omitted, inferred from sample_files.",
+                },
+                "expected_size_bytes": {
+                    "type": "integer",
+                    "description": "Typical file size in bytes for this data source. If omitted, "
+                    "derived from the average size of sample_files.",
+                },
+                "min_size_bytes": {
+                    "type": "integer",
+                    "description": "Smallest file size expected, in bytes. If omitted, derived from "
+                    "the smallest sample_files provided.",
+                },
+                "max_size_bytes": {
+                    "type": "integer",
+                    "description": "Largest file size expected, in bytes. If omitted, derived from "
+                    "the largest sample_files provided.",
+                },
+                "columns": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "type": {"type": "string"},
+                            "description": {"type": "string"},
+                            "example": {"type": "string"},
+                        },
+                        "required": ["name"],
+                    },
+                    "description": "Known columns/fields in the data, if the user has useful context to "
+                    "add beyond what the samples already show (what a field means, valid ranges, units). "
+                    "Optional — anything not supplied here is inferred from sample_files.",
                 },
                 "create_access_keys": {
                     "type": "boolean",
@@ -178,6 +239,7 @@ class LandingZoneTool(BaseTool):
                 "data_classification",
                 "retention_policy",
                 "data_owner",
+                "sample_files",
             ],
         }
 
@@ -194,13 +256,19 @@ class LandingZoneTool(BaseTool):
         kms_key_arn: str = "",
         existing_s3_bucket_arn: str = "",
         s3_stage_prefix: str = "data/",
-        file_format_type: str = "JSON",
+        file_format_type: str | None = None,
         create_access_keys: bool = False,
         schema_names: list[str] = None,
         create_snowpipe: bool = False,
         bronze_table_name: str = "",
         snowpipe_filter_prefix: str = "",
         snowpipe_filter_suffix: str = "",
+        sample_files: list[dict] | None = None,
+        data_description: str | None = None,
+        expected_size_bytes: int | None = None,
+        min_size_bytes: int | None = None,
+        max_size_bytes: int | None = None,
+        columns: list[dict] | None = None,
         tags: dict = {},
         stack_overrides: dict | None = None,
         _action: str = "add",
@@ -211,9 +279,35 @@ class LandingZoneTool(BaseTool):
             schema_names = ["bronze", "silver", "gold", "platinum"]
         if create_snowpipe and not bronze_table_name:
             return "create_snowpipe requires bronze_table_name (the Bronze table Snowpipe will create and load into)."
+        # Only required on initial creation — update_landing_zone re-invokes this with
+        # _action="update" for unrelated field changes and never has samples to hand,
+        # and re-inferring/overwriting an existing profile on every unrelated update
+        # would be both wrong and impossible without them.
+        if _action == "add" and not sample_files:
+            return (
+                "sample_files is required — ask the user for at least one representative sample of the "
+                "data that will land here (its raw content, pasted as text) before calling this."
+            )
         if stack_name and not _target_stack_names:
             _target_stack_names = [stack_name]
         stack_overrides = stack_overrides or {}
+
+        profile = None
+        if sample_files:
+            profile = await infer_profile(
+                landing_zone_name=name,
+                sample_files=sample_files,
+                data_description=data_description,
+                file_format=file_format_type,
+                expected_size_bytes=expected_size_bytes,
+                min_size_bytes=min_size_bytes,
+                max_size_bytes=max_size_bytes,
+                columns=columns,
+            )
+            file_format_type = profile["file_format"] or "JSON"
+            await upsert_profile(self._db, self._account_id, name, profile)
+        else:
+            file_format_type = file_format_type or "JSON"
 
         upload_root = Path(__file__).resolve().parents[3] / "upload" / name
         shutil.rmtree(upload_root, ignore_errors=True)
@@ -471,10 +565,27 @@ class LandingZoneTool(BaseTool):
             if create_snowpipe else ""
         )
 
+        profile_summary = ""
+        if profile:
+            columns_lines = "\n".join(
+                f"    - {c.get('name')} ({c.get('type', 'unknown')}): {c.get('description', '')}"
+                for c in (profile.get("columns") or [])
+            )
+            profile_summary = (
+                f"Data profile (inferred from {len(sample_files)} sample(s), stored for reuse later):\n"
+                f"  Description:  {profile.get('description') or '(none)'}\n"
+                f"  File format:  {file_format_type}\n"
+                f"  Size (bytes): min={profile.get('min_size_bytes')} expected={profile.get('expected_size_bytes')} "
+                f"max={profile.get('max_size_bytes')}\n"
+                + (f"  Columns:\n{columns_lines}\n" if columns_lines else "")
+                + "\n"
+            )
+
         return (
             f"Landing zone ready at {upload_root}\n\n"
             f"{config_summary}\n\n"
             f"{snowpipe_summary}"
+            f"{profile_summary}"
             f"Structure:\n"
             f"  upload/{name}/\n"
             f"    modules/ (version {stacks[0].module_version})\n"
@@ -645,9 +756,9 @@ class LandingZoneTool(BaseTool):
         return result.scalar_one_or_none()
 
     def _copy_modules(self, upload_root: Path, module_version: str) -> None:
-        version_dir = module_source_dir(module_version)
-        for rel_path in MODULE_COMPONENTS:
-            src = version_dir / rel_path
+        stack_dir = module_source_dir(module_version)
+        for rel_path in stack_components(module_version):
+            src = stack_dir / rel_path
             dst = upload_root / "modules" / rel_path
             if src.exists():
                 os.makedirs(dst.parent, exist_ok=True)

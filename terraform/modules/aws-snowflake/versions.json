@@ -1,0 +1,12 @@
+[
+  {
+    "version": "1.0.0",
+    "released_at": "2026-07-03",
+    "notes": "Initial versioned release: S3 landing zone (with inline access-keys secret support), Snowflake database + medallion schemas, and Snowflake storage integration."
+  },
+  {
+    "version": "1.0.1",
+    "released_at": "2026-07-08",
+    "notes": "Restructured module source layout to terraform/modules/<stack>/<version>/ so each module stack (e.g. aws-snowflake) can be versioned independently. No functional changes to the modules themselves — identical to 1.0.0 plus the Snowpipe module added earlier."
+  }
+]

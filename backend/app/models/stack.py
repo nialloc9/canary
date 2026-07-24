@@ -36,6 +36,12 @@ class Stack(Base):
     cloud_access_key_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     cloud_secret_access_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     cloud_region: Mapped[str | None] = mapped_column(String(50), nullable=True, default="us-east-1")
+    # Only meaningful when the project's cicd_provider is "circleci" — the
+    # name of a CircleCI context (created by the user in Project Settings →
+    # Contexts, holding this stack's SNOWFLAKE_*/AWS_* env vars) that the
+    # generated workflow's jobs for this stack will reference. Canary never
+    # pushes secret values into it, unlike GitHub Actions repo secrets.
+    circleci_context: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

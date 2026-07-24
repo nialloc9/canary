@@ -49,6 +49,7 @@ class StackCreate(BaseModel):
     verify_before_pr: bool | None = None
     verify_max_attempts: int | None = Field(default=None, ge=1, le=10)
     module_version: str | None = None
+    circleci_context: str | None = None
     warehouse: WarehouseUpdate | None = None
     cloud: CloudUpdate | None = None
 
@@ -59,6 +60,7 @@ class StackUpdate(BaseModel):
     verify_before_pr: bool | None = None
     verify_max_attempts: int | None = Field(default=None, ge=1, le=10)
     module_version: str | None = None
+    circleci_context: str | None = None
     warehouse: WarehouseUpdate | None = None
     cloud: CloudUpdate | None = None
 
@@ -70,6 +72,7 @@ class StackOut(BaseModel):
     verify_before_pr: bool
     verify_max_attempts: int
     module_version: str
+    circleci_context: str | None
     sort_order: int
     is_default: bool
     warehouse: WarehouseOut

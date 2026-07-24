@@ -8,7 +8,7 @@ from app.models.project import GitHubRepo
 from app.models.stack import Stack
 from app.services.git_ops import clone_repo, has_changes, commit_and_push, GitOpsError
 from app.services.github_service import GitHubService, GitHubError
-from app.services.module_versions_service import MODULE_COMPONENTS, module_source_dir
+from app.services.module_versions_service import module_source_dir, stack_components
 
 
 @dataclass
@@ -42,9 +42,10 @@ async def hard_refresh_modules(repo: GitHubRepo, stack: Stack) -> ModuleRefreshR
         if modules_dir.exists():
             shutil.rmtree(modules_dir)
 
+        stack_dir = module_source_dir(stack.module_version)
         added_count = 0
-        for rel_path in MODULE_COMPONENTS:
-            src = module_source_dir(stack.module_version) / rel_path
+        for rel_path in stack_components(stack.module_version):
+            src = stack_dir / rel_path
             if not src.exists():
                 continue
             dst = modules_dir / rel_path

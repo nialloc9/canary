@@ -54,6 +54,7 @@ def _stack_out(record: Stack) -> StackOut:
         verify_before_pr=record.verify_before_pr,
         verify_max_attempts=record.verify_max_attempts,
         module_version=record.module_version,
+        circleci_context=record.circleci_context,
         sort_order=record.sort_order,
         is_default=record.is_default,
         warehouse=WarehouseOut(
@@ -206,6 +207,7 @@ async def create_stack(
         verify_before_pr=payload.verify_before_pr or False,
         verify_max_attempts=payload.verify_max_attempts or 3,
         module_version=payload.module_version or latest_module_version(),
+        circleci_context=payload.circleci_context,
         sort_order=next_sort_order,
         is_default=False,
     )
@@ -282,6 +284,9 @@ async def update_stack(
 
     if payload.module_version is not None:
         record.module_version = payload.module_version
+
+    if payload.circleci_context is not None:
+        record.circleci_context = payload.circleci_context
 
     _apply_warehouse(record, payload.warehouse)
     _apply_cloud(record, payload.cloud)

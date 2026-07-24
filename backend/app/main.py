@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.config import get_settings
 from app.core.database import db
-from app.api.routes import chat, health, github, auth, stacks, projects, users, org
+from app.api.routes import chat, health, github, auth, stacks, projects, users, org, dbt
 
 settings = get_settings()
 
@@ -39,3 +39,4 @@ app.include_router(stacks.router, prefix=settings.api_prefix)
 app.include_router(projects.router, prefix=settings.api_prefix)
 app.include_router(users.router, prefix=settings.api_prefix)
 app.include_router(org.router, prefix=settings.api_prefix)
+app.include_router(dbt.router, prefix=settings.api_prefix)

@@ -25,6 +25,10 @@ Extract the current configuration and return it as a JSON object with exactly th
   file_format_type     - string, one of: JSON, CSV, PARQUET, AVRO, ORC, XML
   schema_names         - list of strings
   create_access_keys   - boolean (true if an IAM user with access keys was created for direct S3 access)
+  create_snowpipe      - boolean (true only if a "{name}-pipe/terragrunt.hcl" file is included below)
+  bronze_table_name    - string or null (the `target_table` input from the pipe's terragrunt.hcl; null if no pipe file was included)
+  snowpipe_filter_prefix - string (the pipe's `filter_prefix` input, or "" if absent/no pipe)
+  snowpipe_filter_suffix - string (the pipe's `filter_suffix` input, or "" if absent/no pipe)
 
 HCL files:
 
@@ -52,6 +56,11 @@ class UpdateLandingZoneTool(BaseTool):
             "current Terragrunt config for the named landing zone, applies only the fields "
             "you specify, regenerates the configs, and opens a PR with the changes. "
             "Only provide the fields you want to change — everything else is preserved as-is. "
+            "Pass create_snowpipe=true with bronze_table_name to add Snowpipe auto-ingest to a landing "
+            "zone that doesn't have it yet, or change bronze_table_name/snowpipe_filter_prefix/"
+            "snowpipe_filter_suffix to reconfigure an existing one. Setting create_snowpipe=false does "
+            "NOT remove an already-deployed pipe or Bronze table — use remove_terragrunt_block with "
+            "'{name}-pipe' for that instead. "
             "By default this applies the change to every stack (e.g. dev AND prod) — always pass "
             "stack_name when the user's request is specific to one environment (e.g. 'only in dev', "
             "'prod should stay the same', 'just for staging'), otherwise you will silently change "
@@ -104,6 +113,25 @@ class UpdateLandingZoneTool(BaseTool):
                     "type": "boolean",
                     "description": "Create an IAM user with access keys for direct S3 access to this landing zone's bucket.",
                 },
+                "create_snowpipe": {
+                    "type": "boolean",
+                    "description": "Add Snowpipe auto-ingest (with a Bronze table) to this landing zone. "
+                    "Requires bronze_table_name if not already set. Setting this to false does NOT delete "
+                    "an existing pipe — use remove_terragrunt_block for that.",
+                },
+                "bronze_table_name": {
+                    "type": "string",
+                    "description": "Unqualified name for the Bronze table Snowpipe loads into (e.g. "
+                    "RAW_EVENTS). Required the first time create_snowpipe is set to true.",
+                },
+                "snowpipe_filter_prefix": {
+                    "type": "string",
+                    "description": "S3 key prefix to filter Snowpipe ingest event notifications.",
+                },
+                "snowpipe_filter_suffix": {
+                    "type": "string",
+                    "description": "S3 key suffix to filter Snowpipe ingest event notifications, e.g. .json",
+                },
                 "confirm": {
                     "type": "boolean",
                     "default": False,
@@ -127,6 +155,10 @@ class UpdateLandingZoneTool(BaseTool):
         file_format_type: str | None = None,
         schema_names: list[str] | None = None,
         create_access_keys: bool | None = None,
+        create_snowpipe: bool | None = None,
+        bronze_table_name: str | None = None,
+        snowpipe_filter_prefix: str | None = None,
+        snowpipe_filter_suffix: str | None = None,
         confirm: bool = False,
         _chat_branch: str | None = None,
     ) -> str:
@@ -190,6 +222,10 @@ class UpdateLandingZoneTool(BaseTool):
                 "file_format_type": file_format_type,
                 "schema_names": schema_names,
                 "create_access_keys": create_access_keys,
+                "create_snowpipe": create_snowpipe,
+                "bronze_table_name": bronze_table_name,
+                "snowpipe_filter_prefix": snowpipe_filter_prefix,
+                "snowpipe_filter_suffix": snowpipe_filter_suffix,
             }.items()
             if v is not None
         }
@@ -197,6 +233,9 @@ class UpdateLandingZoneTool(BaseTool):
 
         if not patch:
             return f"No fields were specified to change on landing zone '{name}' — nothing to do."
+
+        if merged.get("create_snowpipe") and not merged.get("bronze_table_name"):
+            return "create_snowpipe requires bronze_table_name (the Bronze table Snowpipe will create and load into)."
 
         if not confirm:
             changes = "\n".join(
@@ -228,6 +267,10 @@ class UpdateLandingZoneTool(BaseTool):
             file_format_type=merged.get("file_format_type", "JSON"),
             schema_names=merged.get("schema_names", ["bronze", "silver", "gold", "platinum"]),
             create_access_keys=merged.get("create_access_keys", False),
+            create_snowpipe=merged.get("create_snowpipe", False),
+            bronze_table_name=merged.get("bronze_table_name") or "",
+            snowpipe_filter_prefix=merged.get("snowpipe_filter_prefix") or "",
+            snowpipe_filter_suffix=merged.get("snowpipe_filter_suffix") or "",
             _action="update",
             _target_stack_names=[stack_name] if stack_name else None,
             _chat_branch=_chat_branch,
@@ -252,7 +295,7 @@ class UpdateLandingZoneTool(BaseTool):
         # account's lowest-sort-order stack as a representative default (a plain,
         # unscoped update applies uniformly to every stack anyway). The clone was
         # already checked out to that stack's own branch, so this is just a path.
-        for component in (f"{name}-lz", f"{name}-si", f"{name}-db-arch"):
+        for component in (f"{name}-lz", f"{name}-si", f"{name}-db-arch", f"{name}-pipe"):
             hcl = base / reference_stack / "landing-zone" / component / "terragrunt.hcl"
             if hcl.exists():
                 files[f"{reference_stack}/landing-zone/{component}/terragrunt.hcl"] = hcl.read_text()

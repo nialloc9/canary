@@ -1,7 +1,0 @@
-[
-  {
-    "version": "1.0.0",
-    "released_at": "2026-07-03",
-    "notes": "Initial versioned release: S3 landing zone (with inline access-keys secret support), Snowflake database + medallion schemas, and Snowflake storage integration."
-  }
-]

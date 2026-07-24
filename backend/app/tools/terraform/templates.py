@@ -34,38 +34,47 @@ inputs = merge(
   local.env_vars.locals,
 )
 
-generate "provider" {{
+generate "provider" {
   path      = "provider.tf"
   if_exists = "skip"
   contents  = <<-EOF
-    terraform {{
-      required_providers {{
-        aws = {{
+    terraform {
+      required_providers {
+        aws = {
           source  = "hashicorp/aws"
           version = "~> 5.0"
-        }}
-        snowflake = {{
+        }
+        snowflake = {
           source  = "Snowflake-Labs/snowflake"
           version = "~> 0.87"
-        }}
-        random = {{
+        }
+        random = {
           source  = "hashicorp/random"
           version = "~> 3.0"
-        }}
-        time = {{
+        }
+        time = {
           source  = "hashicorp/time"
           version = "~> 0.9"
-        }}
-      }}
-    }}
+        }
+      }
+    }
 
-    provider "aws" {{
-      region = "${{local.aws_region}}"
-    }}
+    provider "aws" {
+      region = "${local.aws_region}"
+    }
 
-    provider "snowflake" {{}}
+    provider "snowflake" {
+      preview_features_enabled = [
+        "snowflake_table_resource",
+        "snowflake_storage_integration_aws_resource",
+        "snowflake_storage_integration_resource",
+        "snowflake_file_format_resource",
+        "snowflake_stage_resource",
+        "snowflake_pipe_resource",
+      ]
+    }
   EOF
-}}
+}
 '''
 
 
@@ -239,6 +248,153 @@ jobs:
 {apply_jobs}'''
 
 
+# Pinned via GitHub releases — bump these two lines to update. Kept out of a
+# vendored orb deliberately: unlike a customer's own CircleCI project, Canary
+# has no way to know what orbs a given account is entitled to use, so this
+# generates a fully self-contained job that just curls the binaries.
+_TERRAFORM_VERSION = "1.9.8"
+_TERRAGRUNT_VERSION = "0.68.4"
+
+
+def circleci_config(
+    infra_stacks: list[dict],
+    bootstrap_stacks: list[dict],
+    infrastructure_base_path: str,
+) -> str:
+    """Generate the single .circleci/config.yml covering both the
+    infrastructure-deploy and bootstrap workflows.
+
+    Unlike ci_workflow()/bootstrap_workflow() (GitHub Actions), this never
+    embeds a secret value anywhere — every stack must already have a
+    circleci_context (a CircleCI context the user created themselves, in
+    Project Settings -> Contexts, holding that stack's SNOWFLAKE_*/AWS_*
+    env vars) and the generated jobs only ever reference it by name.
+
+    CircleCI has no native "on pull_request" trigger the way GitHub Actions
+    does — pushes to any branch trigger a build regardless of PR state. The
+    closest equivalent used here: a stack's plan job runs on every branch
+    *except* its own deploy branch (i.e. feature branches / open PRs headed
+    towards it), and its apply job runs only on pushes to that branch
+    (i.e. after a PR merges).
+    """
+
+    def _job_block(
+        name: str,
+        job: str,
+        working_directory: str,
+        action: str,
+        context: str,
+        region: str,
+        branch: str,
+        only: bool,
+        requires: list[str] | None = None,
+    ) -> str:
+        filter_kind = "only" if only else "ignore"
+        requires_yaml = f"\n          requires: [{', '.join(requires)}]" if requires else ""
+        return f'''      - {job}:
+          name: {name}
+          working_directory: {working_directory}
+          action: {action}
+          context: [{context}]
+          environment:
+            AWS_DEFAULT_REGION: {region}{requires_yaml}
+          filters:
+            branches:
+              {filter_kind}: {branch}
+'''
+
+    infra_jobs = "\n".join(
+        _job_block(
+            name=f"plan-{s['name']}", job="terragrunt-run",
+            working_directory=f"{infrastructure_base_path}/{s['name']}", action="plan",
+            context=s["circleci_context"], region=s["region"], branch=s["branch"], only=False,
+        ) + _job_block(
+            name=f"apply-{s['name']}", job="terragrunt-run",
+            working_directory=f"{infrastructure_base_path}/{s['name']}", action="apply -auto-approve",
+            context=s["circleci_context"], region=s["region"], branch=s["branch"], only=True,
+        )
+        for s in infra_stacks
+    )
+
+    bootstrap_jobs = "\n".join(
+        _job_block(
+            name=f"plan-bootstrap-{s['name']}", job="terraform-run",
+            working_directory=f"bootstrap/{s['name']}", action="plan",
+            context=s["circleci_context"], region=s["region"], branch=s["branch"], only=False,
+        ) + _job_block(
+            name=f"apply-bootstrap-{s['name']}", job="terraform-run",
+            working_directory=f"bootstrap/{s['name']}", action="apply -auto-approve",
+            context=s["circleci_context"], region=s["region"], branch=s["branch"], only=True,
+            requires=[f"apply-bootstrap-{bootstrap_stacks[i - 1]['name']}"] if i > 0 else None,
+        )
+        for i, s in enumerate(bootstrap_stacks)
+    )
+
+    contexts_doc = "\n".join(
+        f"#   {s['name']} -> {s['circleci_context']}" for s in infra_stacks
+    )
+
+    return f'''version: 2.1
+
+# Required CircleCI context per stack (Project Settings -> Contexts on
+# circleci.com), each holding SNOWFLAKE_ORGANIZATION_NAME, SNOWFLAKE_ACCOUNT_NAME,
+# SNOWFLAKE_USER, SNOWFLAKE_AUTHENTICATOR, SNOWFLAKE_PRIVATE_KEY (PEM, not
+# base64-encoded), AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY. Canary never
+# writes to these contexts itself — populate them yourself before merging.
+{contexts_doc}
+
+commands:
+  install_terraform_terragrunt:
+    steps:
+      - run:
+          name: Install Terraform & Terragrunt
+          command: |
+            curl -sL https://releases.hashicorp.com/terraform/{_TERRAFORM_VERSION}/terraform_{_TERRAFORM_VERSION}_linux_amd64.zip -o /tmp/terraform.zip
+            sudo unzip -o /tmp/terraform.zip -d /usr/local/bin
+            curl -sL https://github.com/gruntwork-io/terragrunt/releases/download/v{_TERRAGRUNT_VERSION}/terragrunt_linux_amd64 -o /tmp/terragrunt
+            sudo install -m 0755 /tmp/terragrunt /usr/local/bin/terragrunt
+
+jobs:
+  terragrunt-run:
+    parameters:
+      working_directory: {{ type: string }}
+      action: {{ type: string }}
+    docker:
+      - image: cimg/base:current
+    steps:
+      - checkout
+      - install_terraform_terragrunt
+      - run:
+          name: Terragrunt << parameters.action >>
+          working_directory: << parameters.working_directory >>
+          command: terragrunt run-all << parameters.action >> --terragrunt-non-interactive
+
+  terraform-run:
+    parameters:
+      working_directory: {{ type: string }}
+      action: {{ type: string }}
+    docker:
+      - image: cimg/base:current
+    steps:
+      - checkout
+      - install_terraform_terragrunt
+      - run:
+          name: Terraform << parameters.action >>
+          working_directory: << parameters.working_directory >>
+          command: |
+            terraform init
+            terraform << parameters.action >>
+
+workflows:
+  canary-infrastructure-deploy:
+    jobs:
+{infra_jobs}
+  canary-bootstrap:
+    jobs:
+{bootstrap_jobs}
+'''
+
+
 def global_hcl(name: str, extra_tags_hcl: str) -> str:
     common_tags_block = f"\n{extra_tags_hcl}" if extra_tags_hcl else ""
     return f'''locals {{
@@ -398,49 +554,6 @@ def state_bootstrap_versions() -> str:
 '''
 
 
-def pipe(
-    name: str,
-    snowflake_database: str,
-    snowflake_schema: str,
-    target_table: str,
-    filter_prefix: str = "",
-    filter_suffix: str = "",
-) -> str:
-    optional_inputs = ""
-    if filter_prefix:
-        optional_inputs += f'\n  filter_prefix = "{filter_prefix}"'
-    if filter_suffix:
-        optional_inputs += f'\n  filter_suffix = "{filter_suffix}"'
-
-    return f'''include "base" {{
-  path = find_in_parent_folders()
-}}
-
-terraform {{
-  source = "${{get_parent_terragrunt_dir()}}/modules/aws/snowflake-pipe"
-}}
-
-dependency "lz" {{
-  config_path = "../{name}-lz"
-
-  mock_outputs = {{
-    bucket_id  = "MOCK_{name.upper().replace('-', '_')}_BUCKET"
-    stage_name = "MOCK_DB.MOCK_SCHEMA.MOCK_{name.upper().replace('-', '_')}_STAGE"
-  }}
-  mock_outputs_allowed_terraform_commands = ["validate", "plan"]
-}}
-
-inputs = {{
-  name               = "{name}"
-  bucket_id          = dependency.lz.outputs.bucket_id
-  snowflake_database = "{snowflake_database}"
-  snowflake_schema   = "{snowflake_schema}"
-  stage_fqn          = dependency.lz.outputs.stage_name
-  target_table       = "{target_table}"{optional_inputs}
-}}
-'''
-
-
 def lz(
     name: str,
     env: str,
@@ -545,5 +658,82 @@ inputs = {{
   snowflake_schema   = dependency.db_arch.outputs.landing_zone_schema_name
 
   file_format_type = "{file_format_type}"
+}}
+'''
+
+
+def pipe_from_landing_zone(
+    name: str,
+    target_table: str,
+    filter_prefix: str = "",
+    filter_suffix: str = "",
+) -> str:
+    """Snowpipe terragrunt config, used both inline by `create_landing_zone`
+    and standalone by `create_snowflake_pipe` (retrofitting an existing
+    landing zone). Always wires up to the sibling {name}-db/-db-arch/-lz/-si
+    components via dependency blocks rather than accepting literal database/
+    schema strings — those names are transformed by the db/medallion-arch
+    modules (uppercased, schema suffixed with its data classification), so
+    a hand-typed literal is one typo away from a Snowflake "object does not
+    exist" failure at apply time. Deriving them here means the pipe can
+    never drift out of sync with the landing zone it belongs to.
+    """
+    optional_inputs = ""
+    if filter_prefix:
+        optional_inputs += f'\n  filter_prefix = "{filter_prefix}"'
+    if filter_suffix:
+        optional_inputs += f'\n  filter_suffix = "{filter_suffix}"'
+
+    return f'''include "base" {{
+  path = find_in_parent_folders()
+}}
+
+terraform {{
+  source = "${{get_parent_terragrunt_dir()}}/modules/aws/snowflake-pipe"
+}}
+
+dependency "lz" {{
+  config_path = "../{name}-lz"
+
+  mock_outputs = {{
+    s3_bucket_name = "MOCK_{name.upper().replace('-', '_')}_BUCKET"
+  }}
+  mock_outputs_allowed_terraform_commands = ["validate", "plan"]
+}}
+
+dependency "db" {{
+  config_path = "../{name}-db"
+
+  mock_outputs = {{
+    name = "MOCK_{name.upper().replace('-', '_')}"
+  }}
+  mock_outputs_allowed_terraform_commands = ["validate", "plan"]
+}}
+
+dependency "db_arch" {{
+  config_path = "../{name}-db-arch"
+
+  mock_outputs = {{
+    landing_zone_schema_name = "MOCK_LANDING_ZONE"
+  }}
+  mock_outputs_allowed_terraform_commands = ["validate", "plan"]
+}}
+
+dependency "si" {{
+  config_path = "../{name}-si"
+
+  mock_outputs = {{
+    stage_name = "MOCK_DB.MOCK_SCHEMA.MOCK_{name.upper().replace('-', '_')}_STAGE"
+  }}
+  mock_outputs_allowed_terraform_commands = ["validate", "plan"]
+}}
+
+inputs = {{
+  name               = "{name}"
+  bucket_name        = dependency.lz.outputs.s3_bucket_name
+  snowflake_database = dependency.db.outputs.name
+  snowflake_schema   = dependency.db_arch.outputs.landing_zone_schema_name
+  stage_fqn          = dependency.si.outputs.stage_name
+  target_table       = "{target_table}"{optional_inputs}
 }}
 '''

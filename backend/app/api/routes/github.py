@@ -79,6 +79,7 @@ async def connect_repo(
     base_path = _resolve(payload.infrastructure_base_path, "infrastructure_base_path", "infrastructure")
     auto_merge = _resolve(payload.auto_merge, "auto_merge", False)
     create_cicd = _resolve(payload.create_cicd, "create_cicd", True)
+    cicd_provider = _resolve(payload.cicd_provider, "cicd_provider", "github_actions")
     skip_bootstrap = _resolve(payload.skip_bootstrap, "skip_bootstrap", False)
     skip_module_import = _resolve(payload.skip_module_import, "skip_module_import", False)
 
@@ -114,6 +115,7 @@ async def connect_repo(
         record.infrastructure_base_path = base_path
         record.auto_merge = auto_merge
         record.create_cicd = create_cicd
+        record.cicd_provider = cicd_provider
         record.skip_bootstrap = skip_bootstrap
         record.skip_module_import = skip_module_import
     else:
@@ -127,6 +129,7 @@ async def connect_repo(
             infrastructure_base_path=base_path,
             auto_merge=auto_merge,
             create_cicd=create_cicd,
+            cicd_provider=cicd_provider,
             skip_bootstrap=skip_bootstrap,
             skip_module_import=skip_module_import,
         )

@@ -38,18 +38,13 @@ class LandingZoneTool(BaseTool):
             "terragrunt configs for every stack configured on the account, with "
             "{name}-db, {name}-db-arch, and {name}-lz folders wired together via "
             "dependencies. Requires data classification, retention policy, and "
-            "data owner. "
+            "data owner. Do NOT ask for sample files or column details before calling this — "
+            "sample collection is a separate post-creation process. Call this tool as soon as "
+            "you have name, data_classification, retention_policy, and data_owner. "
             "Optionally also provisions Snowpipe auto-ingest in the same call — set "
             "create_snowpipe=true with a bronze_table_name and this adds a {name}-pipe "
             "component wired to this landing zone's own bucket/database/schema/stage, "
             "creating the Bronze table and loading files into it automatically. "
-            "Before calling this, ask the user to describe the data that will land here and to paste in "
-            "at least one representative sample file's content (sample_files, minimum 1) — file format, "
-            "size expectations, and per-column details are all inferred from the sample(s) automatically "
-            "if not given explicitly, and get stored against this landing zone so they never have to be "
-            "asked again later (e.g. when generating dbt models from this data). Ask about individual "
-            "columns too if the user has useful context to add (what each field means, valid value ranges) "
-            "— pass it via columns, but it's optional; anything not supplied is inferred from the samples. "
             "By default this applies to every stack configured on the account (e.g. dev AND "
             "prod) — always pass stack_name when the request is scoped to one environment "
             "(e.g. 'add this to prod', 'only in dev'), otherwise you will silently change "
@@ -137,31 +132,26 @@ class LandingZoneTool(BaseTool):
                         },
                         "required": ["content"],
                     },
-                    "description": "At least one representative sample of the data that will land here — "
-                    "paste its raw content (as text; binary formats like PARQUET/AVRO/ORC can't be inferred "
-                    "this way, just describe them instead). Used to infer file_format_type, size stats, "
-                    "description, and columns for anything not supplied explicitly. Ask the user for this "
-                    "before calling the tool — it's required, not optional.",
+                    "description": "Representative sample files to infer file_format_type, size stats, "
+                    "description, and columns. Optional at creation time — can be provided later via the "
+                    "update flow once the landing zone exists. Do not ask for this before creating the LZ.",
                 },
                 "data_description": {
                     "type": "string",
                     "description": "Plain-language description of what this data represents (e.g. "
-                    "'Shopify order-created webhook events'). If omitted, inferred from sample_files.",
+                    "'Shopify order-created webhook events'). Optional.",
                 },
                 "expected_size_bytes": {
                     "type": "integer",
-                    "description": "Typical file size in bytes for this data source. If omitted, "
-                    "derived from the average size of sample_files.",
+                    "description": "Typical file size in bytes for this data source. Optional.",
                 },
                 "min_size_bytes": {
                     "type": "integer",
-                    "description": "Smallest file size expected, in bytes. If omitted, derived from "
-                    "the smallest sample_files provided.",
+                    "description": "Smallest file size expected, in bytes. Optional.",
                 },
                 "max_size_bytes": {
                     "type": "integer",
-                    "description": "Largest file size expected, in bytes. If omitted, derived from "
-                    "the largest sample_files provided.",
+                    "description": "Largest file size expected, in bytes. Optional.",
                 },
                 "columns": {
                     "type": "array",
@@ -175,9 +165,8 @@ class LandingZoneTool(BaseTool):
                         },
                         "required": ["name"],
                     },
-                    "description": "Known columns/fields in the data, if the user has useful context to "
-                    "add beyond what the samples already show (what a field means, valid ranges, units). "
-                    "Optional — anything not supplied here is inferred from sample_files.",
+                    "description": "Known columns/fields in the data (name, type, description, example). "
+                    "Optional — can be provided later once the landing zone exists.",
                 },
                 "create_access_keys": {
                     "type": "boolean",
@@ -239,7 +228,6 @@ class LandingZoneTool(BaseTool):
                 "data_classification",
                 "retention_policy",
                 "data_owner",
-                "sample_files",
             ],
         }
 
@@ -279,15 +267,6 @@ class LandingZoneTool(BaseTool):
             schema_names = ["bronze", "silver", "gold", "platinum"]
         if create_snowpipe and not bronze_table_name:
             return "create_snowpipe requires bronze_table_name (the Bronze table Snowpipe will create and load into)."
-        # Only required on initial creation — update_landing_zone re-invokes this with
-        # _action="update" for unrelated field changes and never has samples to hand,
-        # and re-inferring/overwriting an existing profile on every unrelated update
-        # would be both wrong and impossible without them.
-        if _action == "add" and not sample_files:
-            return (
-                "sample_files is required — ask the user for at least one representative sample of the "
-                "data that will land here (its raw content, pasted as text) before calling this."
-            )
         if stack_name and not _target_stack_names:
             _target_stack_names = [stack_name]
         stack_overrides = stack_overrides or {}

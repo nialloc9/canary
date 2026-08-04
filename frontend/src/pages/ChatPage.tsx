@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, FormEvent, KeyboardEvent } from 'react'
+import { useState, useEffect, useRef, FormEvent, KeyboardEvent, ChangeEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { api, ChatResponse, ConversationOut, StackOut, ReleaseResult, ReleaseConflict, ProjectOut } from '../api/client'
 import { AppLayout } from '../components/AppLayout'
@@ -50,8 +50,10 @@ export function ChatPage() {
   const [projects, setProjects] = useState<ProjectOut[]>([])
   const [editingConvId, setEditingConvId] = useState<string | undefined>()
   const [editingTitle, setEditingTitle] = useState('')
+  const [attachment, setAttachment] = useState<{ name: string; content: string } | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     api.getConversations().then(setConversations).catch(() => {})
@@ -204,14 +206,30 @@ export function ChatPage() {
     } catch {}
   }
 
+  function handleFileChange(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = ev => {
+      const content = ev.target?.result as string
+      setAttachment({ name: file.name, content })
+    }
+    reader.readAsText(file)
+    e.target.value = ''
+  }
+
   async function send() {
     const text = input.trim()
-    if (!text || sending) return
+    if ((!text && !attachment) || sending) return
+    const fullMessage = attachment
+      ? `${text}\n\n--- Attached file: ${attachment.name} ---\n${attachment.content}`
+      : text
     setInput('')
-    setMessages(m => [...m, { role: 'user', content: text }])
+    setAttachment(null)
+    setMessages(m => [...m, { role: 'user', content: text || `[Attached: ${attachment!.name}]` }])
     setSending(true)
     try {
-      const res: ChatResponse = await api.chat(text, activeConvId, selectedStackId)
+      const res: ChatResponse = await api.chat(fullMessage, activeConvId, selectedStackId)
       setMessages(m => [...m, { role: 'assistant', content: res.reply }])
       setLoadedConvId(res.conversation_id)
       if (!activeConvId) {
@@ -237,6 +255,8 @@ export function ChatPage() {
       send()
     }
   }
+
+  const canSend = (input.trim().length > 0 || attachment !== null) && !sending
 
   function handleFormSubmit(e: FormEvent) {
     e.preventDefault()
@@ -640,31 +660,69 @@ export function ChatPage() {
           </p>
         )}
 
-        <form
-          onSubmit={handleFormSubmit}
-          className="max-w-2xl mx-auto flex items-end gap-2 rounded-xl border border-border/60 bg-muted/20 px-3 py-2.5 focus-within:border-primary/50 focus-within:bg-muted/30 transition-colors"
-        >
-          <Textarea
-            ref={textareaRef}
-            value={input}
-            onChange={e => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Ask anything about your data…"
-            rows={1}
-            disabled={sending}
-            className="flex-1 resize-none border-0 bg-transparent shadow-none focus-visible:ring-0 min-h-0 py-0.5 text-sm placeholder:text-muted-foreground/50"
-          />
-          <Button
-            type="submit"
-            size="sm"
-            disabled={!input.trim() || sending}
-            className="shrink-0 h-8 w-8 p-0 shadow-md shadow-primary/20"
-          >
-            <svg width="14" height="14" viewBox="0 0 18 18" fill="none">
-              <path d="M2 9h14M9 2l7 7-7 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          </Button>
-        </form>
+        <div className="max-w-2xl mx-auto rounded-xl border border-border/60 bg-muted/20 focus-within:border-primary/50 focus-within:bg-muted/30 transition-colors">
+          {attachment && (
+            <div className="flex items-center gap-1.5 px-3 pt-2.5">
+              <div className="flex items-center gap-1.5 rounded-md bg-primary/10 border border-primary/20 px-2 py-1 text-xs text-primary max-w-full">
+                <svg width="11" height="11" viewBox="0 0 16 16" fill="none" className="shrink-0">
+                  <path d="M9 1H4a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V6L9 1z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+                  <path d="M9 1v5h5" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+                </svg>
+                <span className="truncate max-w-[200px]">{attachment.name}</span>
+                <button
+                  type="button"
+                  onClick={() => setAttachment(null)}
+                  className="shrink-0 ml-0.5 text-primary/60 hover:text-primary transition-colors"
+                  aria-label="Remove attachment"
+                >
+                  <svg width="10" height="10" viewBox="0 0 12 12" fill="none">
+                    <path d="M2 2l8 8M10 2l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+          )}
+          <form onSubmit={handleFormSubmit} className="flex items-end gap-2 px-3 py-2.5">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".csv,.tsv,.json,.jsonl,.txt,.xml,.parquet,.avro,.orc,.yaml,.yml,.log"
+              onChange={handleFileChange}
+              className="hidden"
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={sending}
+              aria-label="Attach file"
+              className="shrink-0 h-8 w-8 flex items-center justify-center rounded-lg text-muted-foreground/50 hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-40"
+            >
+              <svg width="15" height="15" viewBox="0 0 20 20" fill="none">
+                <path d="M17.5 10.5l-7.5 7.5a5 5 0 0 1-7-7l8-8a3.33 3.33 0 0 1 4.7 4.7l-8 8a1.67 1.67 0 0 1-2.4-2.4l7-7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+            <Textarea
+              ref={textareaRef}
+              value={input}
+              onChange={e => setInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder="Ask anything about your data…"
+              rows={1}
+              disabled={sending}
+              className="flex-1 resize-none border-0 bg-transparent shadow-none focus-visible:ring-0 min-h-0 py-0.5 text-sm placeholder:text-muted-foreground/50"
+            />
+            <Button
+              type="submit"
+              size="sm"
+              disabled={!canSend}
+              className="shrink-0 h-8 w-8 p-0 shadow-md shadow-primary/20"
+            >
+              <svg width="14" height="14" viewBox="0 0 18 18" fill="none">
+                <path d="M2 9h14M9 2l7 7-7 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </Button>
+          </form>
+        </div>
         <p className="text-center text-[10px] text-muted-foreground/40 mt-2 tracking-wide">
           Enter to send · Shift+Enter for new line
         </p>

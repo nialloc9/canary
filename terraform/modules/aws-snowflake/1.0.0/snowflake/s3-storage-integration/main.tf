@@ -63,7 +63,7 @@ resource "aws_iam_role_policy" "snowflake_s3" {
 ###############################################################################
 
 resource "snowflake_storage_integration_aws" "s3" {
-  name    = upper("${replace(var.name, "-", "_")}_S3_INTEGRATION")
+  name    = upper("${local.sanitized_name}_S3_INTEGRATION")
   enabled = true
 
   storage_provider     = "S3"
@@ -111,7 +111,7 @@ resource "snowflake_file_format" "this" {
 resource "snowflake_stage" "s3" {
   depends_on = [time_sleep.wait_for_storage_integration]
 
-  name                = upper("${replace(var.name, "-", "_")}_S3_STAGE")
+  name                = upper("${local.sanitized_name}_S3_STAGE")
   database            = var.snowflake_database
   schema              = var.snowflake_schema
   storage_integration = snowflake_storage_integration_aws.s3.name

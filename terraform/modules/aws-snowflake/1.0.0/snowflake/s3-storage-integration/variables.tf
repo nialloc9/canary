@@ -40,3 +40,11 @@ variable "tags" {
   description = "Resource tags."
   default     = {}
 }
+
+locals {
+  # Snowflake object identifiers only allow letters, digits, and underscores.
+  # Collapse any run of hyphens, spaces, or other disallowed characters in
+  # var.name into a single underscore so it's safe to use in integration,
+  # file format, and stage names.
+  sanitized_name = replace(var.name, "/[^a-zA-Z0-9]+/", "_")
+}

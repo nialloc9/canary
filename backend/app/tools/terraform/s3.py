@@ -50,6 +50,9 @@ class LandingZoneTool(BaseTool):
             "asked again later (e.g. when generating dbt models from this data). Ask about individual "
             "columns too if the user has useful context to add (what each field means, valid value ranges) "
             "— pass it via columns, but it's optional; anything not supplied is inferred from the samples. "
+            "Also ask whether they want a custom S3 key prefix for where data actually lands in the "
+            "bucket — the default is 'data/', confirm that's fine or get their preferred prefix before "
+            "calling this (see s3_stage_prefix); don't just silently assume the default. "
             "By default this applies to every stack configured on the account (e.g. dev AND "
             "prod) — always pass stack_name when the request is scoped to one environment "
             "(e.g. 'add this to prod', 'only in dev'), otherwise you will silently change "
@@ -117,7 +120,10 @@ class LandingZoneTool(BaseTool):
                 },
                 "s3_stage_prefix": {
                     "type": "string",
-                    "description": "Key prefix within the bucket for the Snowflake stage",
+                    "description": "Key prefix within the bucket where data actually lands — the Snowflake "
+                    "external stage created by {name}-si points at exactly this prefix. Defaults to 'data/' "
+                    "if the user doesn't want anything different. Ask the user before calling this tool "
+                    "whether the default is fine or they want a different prefix — don't silently assume.",
                     "default": "data/",
                 },
                 "file_format_type": {

@@ -5,13 +5,15 @@ from sqlalchemy import select
 from app.api.deps import get_current_account_id
 from app.core.database import get_db
 from app.models.project import DbtRepo
-from app.schemas.dbt import DbtRepoConnect, DbtRepoOut
+from app.schemas.dbt import DbtRepoConnect, DbtRepoOut, DbtRepoConnectResponse
 from app.services.github_service import GitHubService, GitHubError
+from app.services.dbt_scaffold_versions_service import latest_scaffold_version
+from app.services.dbt_scaffold_service import scaffold_dbt_repo, DbtScaffoldError
 
 router = APIRouter(prefix="/dbt", tags=["dbt"])
 
 
-@router.post("/repo", response_model=DbtRepoOut, status_code=201)
+@router.post("/repo", response_model=DbtRepoConnectResponse, status_code=201)
 async def connect_repo(
     payload: DbtRepoConnect,
     db: AsyncSession = Depends(get_db),
@@ -39,7 +41,6 @@ async def connect_repo(
     branch = _resolve(payload.branch, "branch", "main")
     api_url = _resolve(payload.api_url, "api_url", "https://api.github.com")
     dbt_base_path = _resolve(payload.dbt_base_path, "dbt_base_path", ".")
-    cicd_provider = _resolve(payload.cicd_provider, "cicd_provider", "github_actions")
 
     svc = GitHubService(
         token=effective_token,
@@ -60,7 +61,6 @@ async def connect_repo(
         record.token = effective_token
         record.api_url = api_url
         record.dbt_base_path = dbt_base_path
-        record.cicd_provider = cicd_provider
     else:
         record = DbtRepo(
             account_id=account_id,
@@ -69,12 +69,18 @@ async def connect_repo(
             token=effective_token,
             api_url=api_url,
             dbt_base_path=dbt_base_path,
-            cicd_provider=cicd_provider,
+            scaffold_version=latest_scaffold_version(),
         )
         db.add(record)
 
     await db.flush()
-    return record
+
+    try:
+        scaffold_pr_url = await scaffold_dbt_repo(record)
+    except DbtScaffoldError as exc:
+        raise HTTPException(status_code=422, detail=f"Repo connected, but scaffolding failed: {exc}")
+
+    return DbtRepoConnectResponse(**DbtRepoOut.model_validate(record).model_dump(), scaffold_pr_url=scaffold_pr_url)
 
 
 @router.get("/repo", response_model=DbtRepoOut)

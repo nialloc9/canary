@@ -1,0 +1,24 @@
+# Connection config comes entirely from environment variables — nothing here
+# is a secret, so this file is safe to commit. Populate these as secrets in
+# whichever CI system runs the Makefile (or export them locally):
+#
+#   SNOWFLAKE_ACCOUNT      e.g. myorg-myaccount
+#   SNOWFLAKE_USER
+#   SNOWFLAKE_PRIVATE_KEY  PEM-format RSA private key for key-pair auth
+#   SNOWFLAKE_ROLE
+#   SNOWFLAKE_DATABASE
+#   SNOWFLAKE_WAREHOUSE
+#   SNOWFLAKE_SCHEMA
+analytics:
+  target: default
+  outputs:
+    default:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user: "{{ env_var('SNOWFLAKE_USER') }}"
+      private_key: "{{ env_var('SNOWFLAKE_PRIVATE_KEY') }}"
+      role: "{{ env_var('SNOWFLAKE_ROLE') }}"
+      database: "{{ env_var('SNOWFLAKE_DATABASE') }}"
+      warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE') }}"
+      schema: "{{ env_var('SNOWFLAKE_SCHEMA') }}"
+      threads: 4

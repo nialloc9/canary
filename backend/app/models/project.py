@@ -106,7 +106,9 @@ class DbtRepo(Base):
     # editor tooling) generally assumes the project lives at repo root, so
     # this is only here for the rare case someone wants it nested.
     dbt_base_path: Mapped[str] = mapped_column(String(512), nullable=False, default=".")
-    cicd_provider: Mapped[str] = mapped_column(String(50), nullable=False, default="github_actions")
+    # Which dbt/scaffold/<stack>/<version>/ was last vendored into this repo —
+    # same versioned-folder-copy pattern as Stack.module_version for Terraform.
+    scaffold_version: Mapped[str] = mapped_column(String(20), nullable=False, default="1.0.0")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

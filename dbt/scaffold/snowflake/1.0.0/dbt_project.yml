@@ -1,0 +1,17 @@
+name: "analytics"
+version: "1.0.0"
+config-version: 2
+profile: "analytics"
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+models:
+  analytics:
+    +persist_docs:
+      relation: true
+      columns: true

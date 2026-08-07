@@ -212,6 +212,29 @@ export interface GitHubRepoConnect {
   skip_module_import: boolean
 }
 
+export interface DbtRepoOut {
+  id: string
+  repo_full_name: string
+  branch: string
+  api_url: string
+  dbt_base_path: string
+  scaffold_version: string
+  created_at: string
+  updated_at: string
+}
+
+export interface DbtRepoConnectResult extends DbtRepoOut {
+  scaffold_pr_url: string | null
+}
+
+export interface DbtRepoConnect {
+  repo_full_name: string
+  branch?: string
+  token?: string
+  api_url?: string
+  dbt_base_path?: string
+}
+
 export interface StackStateOverride {
   bucket?: string | null
   region?: string | null
@@ -519,5 +542,20 @@ export const api = {
   disconnectRepo(): Promise<void> {
     if (config.mockApi) return mockApi.disconnectRepo()
     return request('/github/repos', { method: 'DELETE' })
+  },
+
+  connectDbtRepo(data: DbtRepoConnect): Promise<DbtRepoConnectResult> {
+    if (config.mockApi) return mockApi.connectDbtRepo(data)
+    return request('/dbt/repo', { method: 'POST', body: JSON.stringify(data) })
+  },
+
+  getDbtRepo(): Promise<DbtRepoOut> {
+    if (config.mockApi) return mockApi.getDbtRepo()
+    return request('/dbt/repo')
+  },
+
+  disconnectDbtRepo(): Promise<void> {
+    if (config.mockApi) return mockApi.disconnectDbtRepo()
+    return request('/dbt/repo', { method: 'DELETE' })
   },
 }

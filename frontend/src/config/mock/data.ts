@@ -6,6 +6,7 @@ import type {
   StackOut,
   ProjectOut,
   GitHubRepoOut,
+  DbtRepoOut,
   Topology,
   AccessKeys,
   ModuleVersion,
@@ -85,6 +86,17 @@ export const MOCK_REPO: GitHubRepoOut = {
   create_cicd: true,
   skip_bootstrap: false,
   skip_module_import: false,
+  created_at: new Date().toISOString(),
+  updated_at: new Date().toISOString(),
+}
+
+export const MOCK_DBT_REPO: DbtRepoOut = {
+  id: 'mock-dbt-repo-1',
+  repo_full_name: 'canary-demo/dbt-models',
+  branch: 'main',
+  api_url: 'https://api.github.com',
+  dbt_base_path: '.',
+  scaffold_version: '1.0.0',
   created_at: new Date().toISOString(),
   updated_at: new Date().toISOString(),
 }

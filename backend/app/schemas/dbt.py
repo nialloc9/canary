@@ -13,20 +13,12 @@ class DbtRepoConnect(BaseModel):
     token: str | None = None
     api_url: str | None = None
     dbt_base_path: str | None = None
-    cicd_provider: str | None = None
 
     @field_validator("repo_full_name")
     @classmethod
     def validate_repo_full_name(cls, v: str) -> str:
         if "/" not in v or len(v.split("/")) != 2:
             raise ValueError("repo_full_name must be in 'owner/repo' format")
-        return v
-
-    @field_validator("cicd_provider")
-    @classmethod
-    def validate_cicd_provider(cls, v: str | None) -> str | None:
-        if v is not None and v not in ("github_actions", "circleci"):
-            raise ValueError("cicd_provider must be 'github_actions' or 'circleci'")
         return v
 
     @field_validator("dbt_base_path")
@@ -44,8 +36,16 @@ class DbtRepoOut(BaseModel):
     branch: str
     api_url: str
     dbt_base_path: str
-    cicd_provider: str
+    scaffold_version: str
     created_at: datetime
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class DbtRepoConnectResponse(DbtRepoOut):
+    """Same shape as DbtRepoOut, plus the scaffold PR link when connecting/
+    updating actually triggered one (None if the repo already had scaffolding
+    or nothing changed)."""
+
+    scaffold_pr_url: str | None = None

@@ -227,6 +227,13 @@ export interface DbtRepoConnectResult extends DbtRepoOut {
   scaffold_pr_url: string | null
 }
 
+export interface DbtScaffoldRefreshResult {
+  pr_url: string | null
+  files_removed: number
+  files_added: number
+  message: string | null
+}
+
 export interface DbtRepoConnect {
   repo_full_name: string
   branch?: string
@@ -557,5 +564,10 @@ export const api = {
   disconnectDbtRepo(): Promise<void> {
     if (config.mockApi) return mockApi.disconnectDbtRepo()
     return request('/dbt/repo', { method: 'DELETE' })
+  },
+
+  refreshDbtScaffold(): Promise<DbtScaffoldRefreshResult> {
+    if (config.mockApi) return mockApi.refreshDbtScaffold()
+    return request('/dbt/repo/refresh', { method: 'POST' })
   },
 }

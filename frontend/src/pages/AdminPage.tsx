@@ -347,6 +347,9 @@ function DbtRepoCard() {
   const [disconnecting, setDisconnecting] = useState(false)
   const [loaded, setLoaded] = useState(false)
   const [scaffoldPrUrl, setScaffoldPrUrl] = useState<string | null>(null)
+  const [refreshStatus, setRefreshStatus] = useState<'idle' | 'refreshing' | 'done' | 'error'>('idle')
+  const [refreshMessage, setRefreshMessage] = useState('')
+  const [refreshPrUrl, setRefreshPrUrl] = useState<string | null>(null)
 
   useEffect(() => {
     load()
@@ -397,6 +400,25 @@ function DbtRepoCard() {
       setRepo(null)
     } catch {}
     setDisconnecting(false)
+  }
+
+  async function hardRefreshScaffold() {
+    setRefreshStatus('refreshing')
+    setRefreshMessage('')
+    setRefreshPrUrl(null)
+    try {
+      const result = await api.refreshDbtScaffold()
+      setRefreshStatus('done')
+      setRefreshPrUrl(result.pr_url)
+      setRefreshMessage(
+        result.pr_url
+          ? `Opened a PR removing ${result.files_removed} file(s) and adding ${result.files_added} file(s).`
+          : result.message ?? 'Already up to date'
+      )
+    } catch (e) {
+      setRefreshStatus('error')
+      setRefreshMessage(e instanceof Error ? e.message : 'Failed to refresh scaffold')
+    }
   }
 
   if (!loaded) return null
@@ -473,6 +495,46 @@ function DbtRepoCard() {
           are never auto-merged — a silently wrong data model is worse than a silently wrong infra
           resource, so these always need manual review.
         </p>
+
+        {repo && (
+          <div className="pt-1 border-t border-border/40">
+            <FieldRow
+              id="dbt-scaffold-version"
+              label="Scaffold version"
+              hint="Re-vendors just the generator-owned tooling (Makefile, docker/, .gitignore) from this version — never touches dbt_project.yml, profiles.yml, models/, or macros/, since those are your actual project content."
+            >
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-mono text-muted-foreground">{repo.scaffold_version}</span>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={hardRefreshScaffold}
+                  disabled={refreshStatus === 'refreshing'}
+                  className="border-border/60"
+                >
+                  {refreshStatus === 'refreshing' ? 'Refreshing…' : 'Hard refresh scaffold'}
+                </Button>
+              </div>
+            </FieldRow>
+            {refreshStatus === 'done' && (
+              <p className={`text-[11px] mt-2 ${refreshPrUrl ? 'text-foreground' : 'text-muted-foreground'}`}>
+                {refreshPrUrl ? (
+                  <>
+                    {refreshMessage}{' '}
+                    <a href={refreshPrUrl} target="_blank" rel="noreferrer" className="text-primary hover:text-primary/80 underline">
+                      View PR
+                    </a>
+                  </>
+                ) : (
+                  `✓ ${refreshMessage}`
+                )}
+              </p>
+            )}
+            {refreshStatus === 'error' && (
+              <p className="text-[11px] text-destructive mt-2">{refreshMessage}</p>
+            )}
+          </div>
+        )}
 
         {scaffoldPrUrl && (
           <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 space-y-1">

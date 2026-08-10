@@ -1,14 +1,36 @@
+import os
 import shutil
 import tempfile
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from app.models.project import DbtRepo
 from app.services.dbt_scaffold_versions_service import scaffold_source_dir
+from app.services.git_ops import clone_repo, has_changes, commit_and_push, GitOpsError
 from app.services.github_service import GitHubService, GitHubError
+
+# The subset of the scaffold that's generator-owned tooling, safe to wipe and
+# re-vendor wholesale on refresh. Deliberately excludes dbt_project.yml,
+# profiles.yml, and models/: those are the user's actual dbt project and get
+# edited as it grows (new models, new vars, new packages) — blowing them away
+# on every refresh would destroy real work, unlike Terraform's modules/ which
+# is never hand-edited. macros/ IS included: it's vendored utility macros
+# (dedupe, clean_string, medallion helpers, etc.), not a place users are
+# expected to hand-edit — any local edits to files under macros/ will be
+# clobbered on refresh.
+REFRESH_PATHS = ("Makefile", "docker", ".gitignore", "macros")
 
 
 class DbtScaffoldError(Exception):
     pass
+
+
+@dataclass
+class ScaffoldRefreshResult:
+    pr_url: str | None
+    files_removed: int
+    files_added: int
 
 
 async def scaffold_dbt_repo(repo: DbtRepo) -> str | None:
@@ -62,3 +84,89 @@ async def scaffold_dbt_repo(repo: DbtRepo) -> str | None:
             raise DbtScaffoldError(str(exc)) from exc
 
     return pr_url
+
+
+async def hard_refresh_dbt_scaffold(repo: DbtRepo) -> ScaffoldRefreshResult:
+    """Re-vendors just the generator-owned tooling (REFRESH_PATHS) from
+    dbt/scaffold/<stack>/<repo.scaffold_version>/ — wipes and re-copies those
+    specific paths only, via a PR. Unlike scaffold_dbt_repo() this always
+    runs (it's an explicit user action, not a first-connect default), but it
+    never touches dbt_project.yml, profiles.yml, or models/, since those are
+    the user's actual project content. Returns pr_url=None if the
+    repo's tooling already matches this version exactly."""
+    clone_dir = None
+    try:
+        try:
+            clone_dir = clone_repo(repo.token, repo.repo_full_name, repo.branch)
+        except GitOpsError as exc:
+            raise DbtScaffoldError(str(exc)) from exc
+
+        base_path = repo.dbt_base_path.strip("/")
+        base = (Path(clone_dir) / base_path) if base_path and base_path != "." else Path(clone_dir)
+
+        version_dir = scaffold_source_dir(repo.scaffold_version)
+        if not version_dir.exists():
+            raise DbtScaffoldError(f"No dbt scaffold found for version '{repo.scaffold_version}'")
+
+        removed_count = 0
+        added_count = 0
+        for rel_path in REFRESH_PATHS:
+            dst = base / rel_path
+            if dst.exists():
+                removed_count += sum(1 for p in dst.rglob("*") if p.is_file()) if dst.is_dir() else 1
+                shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
+
+            src = version_dir / rel_path
+            if not src.exists():
+                continue
+            if src.is_dir():
+                shutil.copytree(src, dst)
+                added_count += sum(1 for p in dst.rglob("*") if p.is_file())
+            else:
+                os.makedirs(dst.parent, exist_ok=True)
+                shutil.copy2(src, dst)
+                added_count += 1
+
+        if not has_changes(clone_dir):
+            return ScaffoldRefreshResult(pr_url=None, files_removed=0, files_added=0)
+
+        slug = datetime.now().strftime("%Y%m%d-%H%M%S")
+        feature_branch = f"chore/dbt-scaffold-refresh-{slug}"
+        try:
+            commit_and_push(
+                clone_dir, feature_branch,
+                f"chore(dbt): refresh scaffold tooling to {repo.scaffold_version}",
+            )
+        except GitOpsError as exc:
+            raise DbtScaffoldError(str(exc)) from exc
+
+        svc = GitHubService(
+            token=repo.token, repo_full_name=repo.repo_full_name,
+            branch=repo.branch, api_url=repo.api_url,
+        )
+        try:
+            pr_url = await svc.open_branch_pr(
+                head=feature_branch,
+                base=repo.branch,
+                title=f"chore(dbt): refresh scaffold tooling to {repo.scaffold_version}",
+                body=(
+                    "## Summary\n\n"
+                    f"Re-vendors the generator-owned tooling from scaffold version "
+                    f"`{repo.scaffold_version}`:\n\n"
+                    + "\n".join(f"- `{p}`" for p in REFRESH_PATHS)
+                    + "\n\nDoes **not** touch `dbt_project.yml`, `profiles.yml`, or `models/` — "
+                    "those are your project's actual content, never overwritten by a refresh. "
+                    "Note `macros/` IS wholesale re-vendored — any local edits to vendored macro "
+                    "files will be overwritten.\n\n"
+                    f"- Files removed: {removed_count}\n"
+                    f"- Files added: {added_count}\n\n"
+                    "---\n🤖 Generated by Canary"
+                ),
+            )
+        except GitHubError as exc:
+            raise DbtScaffoldError(str(exc)) from exc
+
+        return ScaffoldRefreshResult(pr_url=pr_url, files_removed=removed_count, files_added=added_count)
+    finally:
+        if clone_dir:
+            shutil.rmtree(clone_dir, ignore_errors=True)

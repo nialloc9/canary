@@ -15,3 +15,10 @@ models:
     +persist_docs:
       relation: true
       columns: true
+
+vars:
+  # Must match the `data_classification` input on the Terraform
+  # aws-snowflake//snowflake/medallion-arch module for this environment —
+  # it's the suffix Terraform appends to every layer schema name
+  # (e.g. SILVER_CONFIDENTIAL). See macros/medallion_schema.sql.
+  data_classification: "confidential"

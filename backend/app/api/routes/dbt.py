@@ -5,10 +5,10 @@ from sqlalchemy import select
 from app.api.deps import get_current_account_id
 from app.core.database import get_db
 from app.models.project import DbtRepo
-from app.schemas.dbt import DbtRepoConnect, DbtRepoOut, DbtRepoConnectResponse
+from app.schemas.dbt import DbtRepoConnect, DbtRepoOut, DbtRepoConnectResponse, DbtScaffoldRefreshResponse
 from app.services.github_service import GitHubService, GitHubError
 from app.services.dbt_scaffold_versions_service import latest_scaffold_version
-from app.services.dbt_scaffold_service import scaffold_dbt_repo, DbtScaffoldError
+from app.services.dbt_scaffold_service import scaffold_dbt_repo, hard_refresh_dbt_scaffold, DbtScaffoldError
 
 router = APIRouter(prefix="/dbt", tags=["dbt"])
 
@@ -106,3 +106,28 @@ async def disconnect_repo(
         raise HTTPException(status_code=404, detail="No dbt repo connected for this account")
     await db.delete(record)
     await db.flush()
+
+
+@router.post("/repo/refresh", response_model=DbtScaffoldRefreshResponse)
+async def refresh_scaffold(
+    db: AsyncSession = Depends(get_db),
+    account_id: str = Depends(get_current_account_id),
+):
+    result = await db.execute(select(DbtRepo).where(DbtRepo.account_id == account_id))
+    record = result.scalar_one_or_none()
+    if not record:
+        raise HTTPException(status_code=404, detail="No dbt repo connected for this account")
+
+    try:
+        refresh_result = await hard_refresh_dbt_scaffold(record)
+    except DbtScaffoldError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    if refresh_result.pr_url is None:
+        return DbtScaffoldRefreshResponse(pr_url=None, files_removed=0, files_added=0, message="Already up to date")
+
+    return DbtScaffoldRefreshResponse(
+        pr_url=refresh_result.pr_url,
+        files_removed=refresh_result.files_removed,
+        files_added=refresh_result.files_added,
+    )

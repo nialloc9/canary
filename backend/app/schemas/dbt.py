@@ -49,3 +49,10 @@ class DbtRepoConnectResponse(DbtRepoOut):
     or nothing changed)."""
 
     scaffold_pr_url: str | None = None
+
+
+class DbtScaffoldRefreshResponse(BaseModel):
+    pr_url: str | None
+    files_removed: int
+    files_added: int
+    message: str | None = None

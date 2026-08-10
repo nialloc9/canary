@@ -15,6 +15,7 @@ import type {
   DbtRepoOut,
   DbtRepoConnect,
   DbtRepoConnectResult,
+  DbtScaffoldRefreshResult,
   ReleaseResult,
   Topology,
   AccessKeys,
@@ -345,5 +346,10 @@ export const mockApi = {
   async disconnectDbtRepo(): Promise<void> {
     await delay(300)
     mockDbtRepo = null
+  },
+
+  async refreshDbtScaffold(): Promise<DbtScaffoldRefreshResult> {
+    await delay(1200)
+    return { pr_url: null, files_removed: 0, files_added: 0, message: 'Already up to date' }
   },
 }

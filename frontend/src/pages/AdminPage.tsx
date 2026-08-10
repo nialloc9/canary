@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { AppLayout } from '../components/AppLayout'
-import { api, OrgSettings, ProjectOut, GitHubRepoOut, GitHubRepoConnect } from '../api/client'
+import { api, OrgSettings, ProjectOut, GitHubRepoOut, GitHubRepoConnect, DbtRepoOut, DbtRepoConnect } from '../api/client'
 import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
 import { Card, CardContent, CardFooter, CardHeader, CardTitle, CardDescription } from '../components/ui/card'
@@ -322,7 +322,260 @@ function ProjectsTab() {
           </CardContent>
         </Card>
       )}
+
+      <DbtRepoCard />
     </div>
+  )
+}
+
+// ── dbt repo card ────────────────────────────────────────────────────────────
+// Separate from the infra GitHubRepo above — its own repo, own reviewers, own
+// CI/CD, deliberately never auto-merged (see DbtRepo model docstring).
+
+const EMPTY_DBT_FORM: DbtRepoConnect = {
+  repo_full_name: '',
+  branch: 'main',
+  token: '',
+  dbt_base_path: '.',
+}
+
+function DbtRepoCard() {
+  const [repo, setRepo] = useState<DbtRepoOut | null>(null)
+  const [form, setForm] = useState<DbtRepoConnect>(EMPTY_DBT_FORM)
+  const [status, setStatus] = useState<SaveStatus>('idle')
+  const [error, setError] = useState('')
+  const [disconnecting, setDisconnecting] = useState(false)
+  const [loaded, setLoaded] = useState(false)
+  const [scaffoldPrUrl, setScaffoldPrUrl] = useState<string | null>(null)
+  const [refreshStatus, setRefreshStatus] = useState<'idle' | 'refreshing' | 'done' | 'error'>('idle')
+  const [refreshMessage, setRefreshMessage] = useState('')
+  const [refreshPrUrl, setRefreshPrUrl] = useState<string | null>(null)
+
+  useEffect(() => {
+    load()
+  }, [])
+
+  useEffect(() => {
+    setForm(
+      repo
+        ? {
+            repo_full_name: repo.repo_full_name,
+            branch: repo.branch,
+            token: '',
+            dbt_base_path: repo.dbt_base_path,
+          }
+        : EMPTY_DBT_FORM
+    )
+  }, [repo])
+
+  async function load() {
+    try {
+      setRepo(await api.getDbtRepo())
+    } catch {
+      setRepo(null)
+    }
+    setLoaded(true)
+  }
+
+  async function connect() {
+    setError('')
+    setScaffoldPrUrl(null)
+    setStatus('saving')
+    try {
+      const saved = await api.connectDbtRepo(form)
+      setRepo(saved)
+      setScaffoldPrUrl(saved.scaffold_pr_url)
+      setStatus('saved')
+      setTimeout(() => setStatus('idle'), 2500)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to connect repository')
+      setStatus('error')
+    }
+  }
+
+  async function disconnect() {
+    setDisconnecting(true)
+    try {
+      await api.disconnectDbtRepo()
+      setRepo(null)
+    } catch {}
+    setDisconnecting(false)
+  }
+
+  async function hardRefreshScaffold() {
+    setRefreshStatus('refreshing')
+    setRefreshMessage('')
+    setRefreshPrUrl(null)
+    try {
+      const result = await api.refreshDbtScaffold()
+      setRefreshStatus('done')
+      setRefreshPrUrl(result.pr_url)
+      setRefreshMessage(
+        result.pr_url
+          ? `Opened a PR removing ${result.files_removed} file(s) and adding ${result.files_added} file(s).`
+          : result.message ?? 'Already up to date'
+      )
+    } catch (e) {
+      setRefreshStatus('error')
+      setRefreshMessage(e instanceof Error ? e.message : 'Failed to refresh scaffold')
+    }
+  }
+
+  if (!loaded) return null
+
+  const isValid = form.repo_full_name && (form.token || repo)
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{repo ? 'dbt repository settings' : 'Connect dbt repository'}</CardTitle>
+        <CardDescription>
+          {repo
+            ? 'Update where generated dbt models are committed'
+            : "Link a separate repo for Canary to open PRs against when generating dbt models — kept apart from your infrastructure repo since it has its own reviewers and CI"}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid grid-cols-2 gap-4">
+          <FieldRow
+            id="dbt-repo-full"
+            label="Repository (owner/repo)"
+            hint="The GitHub repository holding your dbt project, e.g. acme/dbt-models."
+          >
+            <Input
+              id="dbt-repo-full"
+              value={form.repo_full_name}
+              onChange={e => setForm(f => ({ ...f, repo_full_name: e.target.value }))}
+              placeholder="acme/dbt-models"
+              className="bg-input/50 border-border/60 font-mono text-sm"
+            />
+          </FieldRow>
+          <FieldRow id="dbt-repo-branch" label="Branch" hint="Base branch used when opening dbt model PRs.">
+            <Input
+              id="dbt-repo-branch"
+              value={form.branch}
+              onChange={e => setForm(f => ({ ...f, branch: e.target.value }))}
+              placeholder="main"
+              className="bg-input/50 border-border/60 font-mono text-sm"
+            />
+          </FieldRow>
+          <FieldRow
+            id="dbt-repo-token"
+            label="GitHub token"
+            hint="Personal access token with repo scope for this dbt repo — separate from your infrastructure repo's token."
+          >
+            <Input
+              id="dbt-repo-token"
+              type="password"
+              value={form.token}
+              onChange={e => setForm(f => ({ ...f, token: e.target.value }))}
+              placeholder={repo ? '••••••••  (leave blank to keep existing)' : 'ghp_…'}
+              className="bg-input/50 border-border/60 font-mono text-sm"
+            />
+          </FieldRow>
+          <FieldRow
+            id="dbt-base-path"
+            label="dbt project path"
+            hint="Folder inside the repo where the dbt project lives. Leave as '.' if it's at the repo root."
+          >
+            <Input
+              id="dbt-base-path"
+              value={form.dbt_base_path}
+              onChange={e => setForm(f => ({ ...f, dbt_base_path: e.target.value }))}
+              placeholder="."
+              className="bg-input/50 border-border/60 font-mono text-sm"
+            />
+          </FieldRow>
+        </div>
+
+        <p className="text-xs text-muted-foreground/60">
+          Connecting scaffolds the project structure (dbt_project.yml, profiles.yml, models/, macros/,
+          docker/, and a Makefile with predeploy/deploy/postdeploy targets) via a PR — deliberately
+          CI-tool-agnostic, call those targets from whichever CI system runs this repo. dbt model PRs
+          are never auto-merged — a silently wrong data model is worse than a silently wrong infra
+          resource, so these always need manual review.
+        </p>
+
+        {repo && (
+          <div className="pt-1 border-t border-border/40">
+            <FieldRow
+              id="dbt-scaffold-version"
+              label="Scaffold version"
+              hint="Re-vendors just the generator-owned tooling (Makefile, docker/, .gitignore) from this version — never touches dbt_project.yml, profiles.yml, models/, or macros/, since those are your actual project content."
+            >
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-mono text-muted-foreground">{repo.scaffold_version}</span>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={hardRefreshScaffold}
+                  disabled={refreshStatus === 'refreshing'}
+                  className="border-border/60"
+                >
+                  {refreshStatus === 'refreshing' ? 'Refreshing…' : 'Hard refresh scaffold'}
+                </Button>
+              </div>
+            </FieldRow>
+            {refreshStatus === 'done' && (
+              <p className={`text-[11px] mt-2 ${refreshPrUrl ? 'text-foreground' : 'text-muted-foreground'}`}>
+                {refreshPrUrl ? (
+                  <>
+                    {refreshMessage}{' '}
+                    <a href={refreshPrUrl} target="_blank" rel="noreferrer" className="text-primary hover:text-primary/80 underline">
+                      View PR
+                    </a>
+                  </>
+                ) : (
+                  `✓ ${refreshMessage}`
+                )}
+              </p>
+            )}
+            {refreshStatus === 'error' && (
+              <p className="text-[11px] text-destructive mt-2">{refreshMessage}</p>
+            )}
+          </div>
+        )}
+
+        {scaffoldPrUrl && (
+          <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 space-y-1">
+            <p className="text-xs font-medium text-emerald-600 dark:text-emerald-400">
+              Scaffolding PR opened
+            </p>
+            <a
+              href={scaffoldPrUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="block text-xs text-primary underline break-all"
+            >
+              {scaffoldPrUrl}
+            </a>
+          </div>
+        )}
+
+        {error && (
+          <p className="text-xs text-destructive bg-destructive/10 border border-destructive/20 px-3 py-2 rounded-md">
+            {error}
+          </p>
+        )}
+      </CardContent>
+      <CardFooter className="gap-3">
+        <Button size="sm" onClick={connect} disabled={!isValid || status === 'saving'} className="shadow-md shadow-primary/20">
+          {status === 'saving' ? (repo ? 'Saving…' : 'Connecting…') : repo ? 'Save settings' : 'Connect repository'}
+        </Button>
+        <StatusMessage status={status} savedText={repo ? 'Settings saved' : 'Repository connected'} />
+        {repo && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={disconnect}
+            disabled={disconnecting}
+            className="text-xs border-destructive/30 text-destructive hover:bg-destructive/10 ml-auto"
+          >
+            {disconnecting ? 'Removing…' : 'Disconnect'}
+          </Button>
+        )}
+      </CardFooter>
+    </Card>
   )
 }
 

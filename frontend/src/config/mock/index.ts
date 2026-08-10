@@ -12,6 +12,10 @@ import type {
   ProjectOut,
   GitHubRepoOut,
   GitHubRepoConnect,
+  DbtRepoOut,
+  DbtRepoConnect,
+  DbtRepoConnectResult,
+  DbtScaffoldRefreshResult,
   ReleaseResult,
   Topology,
   AccessKeys,
@@ -27,6 +31,7 @@ import {
   MOCK_STACKS,
   MOCK_PROJECT,
   MOCK_REPO,
+  MOCK_DBT_REPO,
   MOCK_TOPOLOGY,
   MOCK_ACCESS_KEYS,
   MOCK_MODULE_VERSIONS,
@@ -39,6 +44,7 @@ let mockStackCounter = mockStacks.length
 let mockConversations: ConversationOut[] = MOCK_CONVERSATIONS.map(c => ({ ...c, messages: [...(c.messages ?? [])] }))
 let mockProject: ProjectOut = { ...MOCK_PROJECT }
 let mockRepo: GitHubRepoOut | null = { ...MOCK_REPO }
+let mockDbtRepo: DbtRepoOut | null = { ...MOCK_DBT_REPO }
 
 function delay(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -308,5 +314,42 @@ export const mockApi = {
     await delay(300)
     mockRepo = null
     mockProject = { ...mockProject, version_control_created: false }
+  },
+
+  async connectDbtRepo(data: DbtRepoConnect): Promise<DbtRepoConnectResult> {
+    await delay(700)
+    const isFirstConnect = !mockDbtRepo
+    mockDbtRepo = {
+      id: mockDbtRepo?.id ?? 'mock-dbt-repo-1',
+      repo_full_name: data.repo_full_name,
+      branch: data.branch || 'main',
+      api_url: data.api_url || 'https://api.github.com',
+      dbt_base_path: data.dbt_base_path || '.',
+      scaffold_version: mockDbtRepo?.scaffold_version ?? '1.0.0',
+      created_at: mockDbtRepo?.created_at ?? new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    }
+    return {
+      ...mockDbtRepo,
+      scaffold_pr_url: isFirstConnect
+        ? `https://github.com/${mockDbtRepo.repo_full_name}/pull/${Math.floor(Math.random() * 900) + 100}`
+        : null,
+    }
+  },
+
+  async getDbtRepo(): Promise<DbtRepoOut> {
+    await delay(200)
+    if (!mockDbtRepo) throw new Error('No dbt repo connected for this account')
+    return { ...mockDbtRepo }
+  },
+
+  async disconnectDbtRepo(): Promise<void> {
+    await delay(300)
+    mockDbtRepo = null
+  },
+
+  async refreshDbtScaffold(): Promise<DbtScaffoldRefreshResult> {
+    await delay(1200)
+    return { pr_url: null, files_removed: 0, files_added: 0, message: 'Already up to date' }
   },
 }

@@ -48,6 +48,70 @@ Trims whitespace and normalizes blanks (and any upstream placeholder strings pas
 ### `standardize_timestamp(column_name, source_tz='UTC')`
 Casts a raw timestamp column to a single common format: `TIMESTAMP_NTZ` normalized to UTC. `source_tz` tells it what timezone to interpret a naive (offset-less) raw value as before converting; any offset already embedded in the raw string is dropped in favor of `source_tz`. Use it in a `select` list wherever you're typing a raw timestamp column, most often unpacking Bronze's `RAW_DATA` alongside `extract_json_field`.
 
+## Quarantine & validation (run-operations)
+
+Together these are the generic check-then-load pipeline: run a check against candidate rows, quarantine what fails, promote what doesn't. `quarantine` does the first two steps standalone; `validate_and_promote` chains all three so bad rows never reach the target table in the first place.
+
+### `_quarantine_rows(source_table, schema, reason, select_sql, database=none)`
+Internal — shared by `quarantine` and `validate_and_promote` so the create-if-not-exists + insert logic isn't duplicated. Not meant to be called directly.
+
+Creates `QUARANTINE_<source_table>` in the given schema on first use, then appends `select_sql`'s rows to it. Columns are fixed and generic regardless of what's being quarantined or which check caught it: `quarantined_at` (UTC), `source_table`, `reason`, and `raw_data` — the full offending row packed into a VARIANT via `OBJECT_CONSTRUCT(*)`, so the same table shape works for any model. Appends rather than replaces, so it accumulates a history of rejected rows across runs.
+
+### `quarantine(source_table, schema, test_name, test_kwargs={}, database=none)`
+Runs a single generic test against `source_table` and quarantines whatever rows it finds failing (via `_quarantine_rows`).
+
+It works by calling the test macro (`test_<test_name>`, e.g. `test_valid_email` or `test_accepted_range`) directly to get the failing-rows query, then inserting the result. `test_name` is the generic test's name without the `test_` prefix; `test_kwargs` is whatever that test needs besides `model` — usually `column_name`, plus anything test-specific (`min_value`/`max_value` for `accepted_range`). Works with this scaffold's own generic tests (`accepted_range`, `valid_email`) and dbt's built-ins (`not_null`, `unique`, `accepted_values`, `relationships`) alike — a missing-data check is just `test_name: "not_null"`.
+
+Usage — quarantine customers with an invalid email:
+```
+dbt run-operation quarantine --args '{
+    "source_table": "CUSTOMERS",
+    "schema": "silver_confidential",
+    "test_name": "valid_email",
+    "test_kwargs": {"column_name": "email"}
+}'
+```
+
+Usage — quarantine orders with a negative total:
+```
+dbt run-operation quarantine --args '{
+    "source_table": "ORDERS",
+    "schema": "silver_confidential",
+    "test_name": "accepted_range",
+    "test_kwargs": {"column_name": "order_total", "min_value": 0}
+}'
+```
+
+Usage — quarantine rows with a missing (null) required column:
+```
+dbt run-operation quarantine --args '{
+    "source_table": "CUSTOMERS",
+    "schema": "silver_confidential",
+    "test_name": "not_null",
+    "test_kwargs": {"column_name": "email"}
+}'
+```
+
+### `validate_and_promote(target_layer, target_table, select_sql, checks=[], database=none)`
+The full pipeline: runs every check in `checks` against the candidate rows from `select_sql`, quarantines whatever fails each one, and promotes only the rows that passed every check into `target_table` in `target_layer` (via `_promote_medallion_layer` — a full rebuild, same as `load_bronze_to_silver` / `load_silver_to_gold` / `load_gold_to_platinum`).
+
+`checks` is a list of `{test_name, test_kwargs}` objects, same shape as `quarantine`'s arguments. Every failing row lands in `QUARANTINE_<target_table>` tagged with the check that caught it — a row failing more than one check is quarantined once per check, and never reaches `target_table` either way.
+
+Under the hood it first materializes `select_sql` into a temporary staging table tagged with a row hash, so every check runs against the exact same snapshot of candidate rows and a row can be identified consistently across checks without assuming a primary key.
+
+Usage — load Bronze customers into Silver, quarantining any with a missing or invalid email instead of promoting them:
+```
+dbt run-operation validate_and_promote --args '{
+    "target_layer": "silver",
+    "target_table": "CUSTOMERS",
+    "select_sql": "select raw_data:id::int as customer_id, raw_data:email::string as email from my_db.bronze_confidential.customers_bronze qualify row_number() over (partition by raw_data:id order by load_timestamp desc) = 1",
+    "checks": [
+        {"test_name": "not_null", "test_kwargs": {"column_name": "email"}},
+        {"test_name": "valid_email", "test_kwargs": {"column_name": "email"}}
+    ]
+}'
+```
+
 ## Generic tests
 
 Applied under a column's `tests:` list in a schema.yml, same as dbt's built-in `unique` / `not_null` / `accepted_values`.

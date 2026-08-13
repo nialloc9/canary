@@ -7,9 +7,17 @@ from app.core.database import Base
 
 
 class LandingZoneDataProfile(Base):
-    """What's actually landing in a landing zone's Bronze table — collected once,
-    at landing-zone creation time, so the (future) dbt-model-generation tool
-    never has to ask the user for the same description/samples/columns twice.
+    """What's actually landing in one table of a landing zone's Bronze layer —
+    collected once, at landing-zone creation time, so the (future) dbt-model-
+    generation tool never has to ask the user for the same description/
+    samples/columns twice. One row per table: a landing zone with several
+    tables (see create_landing_zone's `tables` list) gets several profile
+    rows, one per table_name.
+
+    table_name is nullable to accommodate rows written before per-table
+    profiles existed — those rows describe the landing zone's one (implicit)
+    table and have no table_name of their own; lookups should treat a NULL
+    table_name row as that legacy single-table profile.
 
     file_format/description/size stats/columns are all nullable: anything the
     user doesn't supply explicitly gets inferred from the sample file(s) they
@@ -21,12 +29,19 @@ class LandingZoneDataProfile(Base):
 
     __tablename__ = "landing_zone_data_profiles"
     __table_args__ = (
-        UniqueConstraint("account_id", "landing_zone_name", name="uq_data_profile_account_lz"),
+        UniqueConstraint(
+            "account_id", "landing_zone_name", "table_name", name="uq_data_profile_account_lz_table"
+        ),
     )
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
     account_id: Mapped[str] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
     landing_zone_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    table_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    owner: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    refresh_rate: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    data_classification: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    s3_prefix: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     file_format: Mapped[str | None] = mapped_column(String(50), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     expected_size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)

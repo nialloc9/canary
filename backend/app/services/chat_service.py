@@ -1,4 +1,3 @@
-import inspect
 import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -8,6 +7,8 @@ from app.services.llm_client import LLMClient
 from app.tools.registry import ToolRegistry
 from app.models.conversation import Conversation, Message
 from app.models.stack import Stack
+from app.models.project import Project
+from app.models.data_classification import DataClassification
 
 _TITLE_PROMPT = """\
 Summarize the topic of this conversation in a short title — 3 to 6 words, plain \
@@ -41,10 +42,10 @@ class ChatService:
 
         history = await self._build_history(conversation.id)
         chat_stack = await self._get_stack(account_id, conversation.stack_id)
-        system_prompt = self._build_system_prompt(chat_stack)
-        reply, tool_calls_log = await self._run(
-            history, system_prompt, chat_stack.branch if chat_stack else None
-        )
+        classifications = await self._get_data_classifications(account_id)
+        default_retention_policy = await self._get_default_retention_policy(account_id)
+        system_prompt = self._build_system_prompt(chat_stack, classifications, default_retention_policy)
+        reply, tool_calls_log = await self._run(history, system_prompt)
 
         await self._persist_message(conversation.id, "assistant", reply, tool_calls_log)
         await self.db.commit()
@@ -55,9 +56,7 @@ class ChatService:
             "tool_calls": tool_calls_log or None,
         }
 
-    async def _run(
-        self, history: list[dict], system_prompt: str | None, chat_branch: str | None = None
-    ) -> tuple[str, list[dict]]:
+    async def _run(self, history: list[dict], system_prompt: str | None) -> tuple[str, list[dict]]:
         """
         Send messages to the model. If it calls a tool, execute it and
         loop back until it returns a final text response.
@@ -82,11 +81,8 @@ class ChatService:
                 if tool is None:
                     output = f"Error: tool '{call.name}' not found"
                 else:
-                    kwargs = dict(call.input)
-                    if "_chat_branch" in inspect.signature(tool.execute).parameters:
-                        kwargs["_chat_branch"] = chat_branch
                     try:
-                        output = await tool.execute(**kwargs)
+                        output = await tool.execute(**call.input)
                     except Exception as exc:
                         output = f"Error: tool '{call.name}' failed — {exc}"
 
@@ -132,35 +128,80 @@ class ChatService:
         )
         return result.scalar_one_or_none()
 
-    def _build_system_prompt(self, stack: Stack | None) -> str | None:
-        if not stack:
-            return None
+    async def _get_data_classifications(self, account_id: str) -> list[DataClassification]:
+        result = await self.db.execute(
+            select(DataClassification)
+            .where(DataClassification.account_id == account_id)
+            .order_by(DataClassification.sort_order)
+        )
+        return list(result.scalars().all())
 
-        lines = [
-            "You are Canary, an AI assistant for data infrastructure and pipelines.",
-            "",
-            f'The user is currently focused on the "{stack.name}" stack (environment). Assume questions '
-            'about "this environment", "this stack", or unqualified warehouse/infra questions refer to '
-            "it unless they say otherwise:",
-            f"- Deployment branch: {stack.branch}",
-        ]
-        if stack.sf_account_name:
-            identity = (
-                f"{stack.sf_organization_name}-{stack.sf_account_name}"
-                if stack.sf_organization_name
-                else stack.sf_account_name
+    async def _get_default_retention_policy(self, account_id: str) -> str | None:
+        result = await self.db.execute(select(Project).where(Project.account_id == account_id))
+        project = result.scalar_one_or_none()
+        return project.default_retention_policy if project else None
+
+    def _build_system_prompt(
+        self,
+        stack: Stack | None,
+        classifications: list[DataClassification],
+        default_retention_policy: str | None,
+    ) -> str | None:
+        lines = ["You are Canary, an AI assistant for data infrastructure and pipelines."]
+
+        if classifications:
+            lines.append("")
+            lines.append(
+                "This account's configured data classifications (used by create_landing_zone and "
+                "draft_landing_zone_tables) — each table/landing zone should get whichever one actually "
+                "fits, judged against these descriptions:"
             )
-            lines.append(f"- Snowflake account: {identity}")
-        if stack.sf_database:
-            lines.append(f"- Snowflake database: {stack.sf_database}")
-        if stack.sf_schema:
-            lines.append(f"- Snowflake schema: {stack.sf_schema}")
-        if stack.sf_warehouse:
-            lines.append(f"- Snowflake warehouse: {stack.sf_warehouse}")
-        if stack.sf_role:
-            lines.append(f"- Snowflake role: {stack.sf_role}")
-        lines.append(f"- Cloud: {stack.cloud_provider.upper()} ({stack.cloud_region or 'region not set'})")
+            for c in classifications:
+                default_marker = " (account default)" if c.is_default else ""
+                desc = f" — {c.description}" if c.description else ""
+                lines.append(f"- {c.name}{default_marker}{desc}")
+            lines.append(
+                "If the user doesn't specify a classification for a table, use the account default. But "
+                "if that table's inferred columns look more sensitive than the default's own description "
+                "covers (e.g. an email/SSN/payment column under a default whose description doesn't "
+                "mention PII), don't silently apply the default — flag it and ask which classification "
+                "actually fits before proceeding."
+            )
 
+        if default_retention_policy:
+            lines.append("")
+            lines.append(
+                f"This account's default retention_policy for create_landing_zone is "
+                f"'{default_retention_policy}' — use it whenever the user doesn't specify one; only ask "
+                "if there's a specific reason this landing zone might need something different."
+            )
+
+        if stack:
+            lines.append("")
+            lines.append(
+                f'The user is currently focused on the "{stack.name}" stack (environment). Assume '
+                'questions about "this environment", "this stack", or unqualified warehouse/infra '
+                "questions refer to it unless they say otherwise:"
+            )
+            if stack.sf_account_name:
+                identity = (
+                    f"{stack.sf_organization_name}-{stack.sf_account_name}"
+                    if stack.sf_organization_name
+                    else stack.sf_account_name
+                )
+                lines.append(f"- Snowflake account: {identity}")
+            if stack.sf_database:
+                lines.append(f"- Snowflake database: {stack.sf_database}")
+            if stack.sf_schema:
+                lines.append(f"- Snowflake schema: {stack.sf_schema}")
+            if stack.sf_warehouse:
+                lines.append(f"- Snowflake warehouse: {stack.sf_warehouse}")
+            if stack.sf_role:
+                lines.append(f"- Snowflake role: {stack.sf_role}")
+            lines.append(f"- Cloud: {stack.cloud_provider.upper()} ({stack.cloud_region or 'region not set'})")
+
+        if len(lines) == 1:
+            return None
         return "\n".join(lines)
 
     async def _build_history(self, conversation_id: str) -> list[dict]:

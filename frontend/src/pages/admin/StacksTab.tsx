@@ -1,14 +1,10 @@
 import { useState, useEffect } from 'react'
-import { api, StackOut, StackUpdate, WarehouseUpdate, CloudUpdate, WarehouseType, CloudProvider, ModuleVersion } from '../../api/client'
+import { api, StackOut, StackUpdate, WarehouseUpdate, CloudUpdate, WarehouseType, CloudProvider } from '../../api/client'
 import { Button } from '../../components/ui/button'
 import { Input } from '../../components/ui/input'
 import { Card, CardContent, CardFooter, CardHeader, CardTitle, CardDescription } from '../../components/ui/card'
 import { SaveStatus, StatusMessage, FieldRow, AWS_REGIONS, NativeSelect, ConnectionStatus, Toggle } from '../../components/admin/shared'
 import { TopologyDiagram } from '../../components/TopologyDiagram'
-
-// Matches backend/app/api/routes/stacks.py PROTECTED_STACK_NAMES — "dev" and
-// "prod" are auto-seeded and load-bearing for the release flow.
-const PROTECTED_STACK_NAMES = new Set(['dev', 'prod'])
 
 function SnowflakeIcon() {
   return (
@@ -92,18 +88,14 @@ function TilePicker<T extends string>({
 function StackDetail({
   stack,
   isOnly,
-  moduleVersions,
   onChanged,
 }: {
   stack: StackOut
   isOnly: boolean
-  moduleVersions: ModuleVersion[]
   onChanged: () => void
 }) {
-  const [branch, setBranch] = useState(stack.branch)
   const [verifyBeforePr, setVerifyBeforePr] = useState(stack.verify_before_pr)
   const [verifyMaxAttempts, setVerifyMaxAttempts] = useState(stack.verify_max_attempts)
-  const [moduleVersion, setModuleVersion] = useState(stack.module_version)
   const [warehouse, setWarehouse] = useState<WarehouseUpdate>(stack.warehouse)
   const [cloud, setCloud] = useState<CloudUpdate>(stack.cloud)
   const [pemInput, setPemInput] = useState('')
@@ -118,15 +110,10 @@ function StackDetail({
   const [cloudTestMessage, setCloudTestMessage] = useState('')
   const [deleteError, setDeleteError] = useState('')
   const [deleting, setDeleting] = useState(false)
-  const [refreshStatus, setRefreshStatus] = useState<'idle' | 'refreshing' | 'done' | 'error'>('idle')
-  const [refreshMessage, setRefreshMessage] = useState('')
-  const [refreshPrUrl, setRefreshPrUrl] = useState<string | null>(null)
 
   useEffect(() => {
-    setBranch(stack.branch)
     setVerifyBeforePr(stack.verify_before_pr)
     setVerifyMaxAttempts(stack.verify_max_attempts)
-    setModuleVersion(stack.module_version)
     setWarehouse(stack.warehouse)
     setCloud(stack.cloud)
     setHasExistingKey(!!stack.warehouse.private_key_b64)
@@ -136,9 +123,6 @@ function StackDetail({
     setWarehouseTestStatus('idle')
     setCloudTestStatus('idle')
     setDeleteError('')
-    setRefreshStatus('idle')
-    setRefreshMessage('')
-    setRefreshPrUrl(null)
   }, [stack.id])
 
   function buildPayload(): StackUpdate {
@@ -151,31 +135,10 @@ function StackDetail({
     else delete cl.secret_access_key
 
     return {
-      branch,
       verify_before_pr: verifyBeforePr,
       verify_max_attempts: verifyMaxAttempts,
-      module_version: moduleVersion,
       warehouse: wh,
       cloud: cl,
-    }
-  }
-
-  async function hardRefreshModules() {
-    setRefreshStatus('refreshing')
-    setRefreshMessage('')
-    setRefreshPrUrl(null)
-    try {
-      const result = await api.refreshStackModules(stack.id)
-      setRefreshStatus('done')
-      setRefreshPrUrl(result.pr_url)
-      setRefreshMessage(
-        result.pr_url
-          ? `Opened a PR removing ${result.files_removed} file(s) and adding ${result.files_added} file(s).`
-          : result.message ?? 'Already up to date'
-      )
-    } catch (e) {
-      setRefreshStatus('error')
-      setRefreshMessage(e instanceof Error ? e.message : 'Failed to refresh modules')
     }
   }
 
@@ -233,106 +196,40 @@ function StackDetail({
 
   const canTestWarehouse = !!warehouse.account_name && !!warehouse.user && (hasExistingKey || !!pemInput)
   const canTestCloud = !!cloud.access_key_id && (hasExistingSecret || !!secretInput)
-  const canDelete = !PROTECTED_STACK_NAMES.has(stack.name) && !isOnly
+  const canDelete = !isOnly
 
   return (
     <div className="space-y-6">
       <Card>
         <CardHeader>
           <CardTitle>Deployment</CardTitle>
-          <CardDescription>Which branch triggers CI/CD for this stack, across every project</CardDescription>
+          <CardDescription>How PRs for this stack's infra get verified before opening</CardDescription>
         </CardHeader>
         <CardContent>
-          <FieldRow id="stack-branch" label="Git branch" hint="Must match a real branch in your connected GitHub repo.">
+          <Toggle
+            id="stack-verify-before-pr"
+            checked={verifyBeforePr}
+            onChange={setVerifyBeforePr}
+            label="Verify before opening PRs"
+            hint="Run terragrunt/terraform plan against generated infra for this stack before opening a PR. On failure, Claude attempts to patch and retry — if it still fails after the retry limit below, no PR is opened. Off by default since it requires this stack's infra to already be bootstrapped and adds time to PR creation."
+          />
+          <div className={`mt-3 flex items-center gap-2 ${verifyBeforePr ? '' : 'opacity-40 pointer-events-none'}`}>
+            <label htmlFor="stack-verify-max-attempts" className="text-xs text-muted-foreground">
+              Retry limit
+            </label>
             <Input
-              id="stack-branch"
-              value={branch}
-              onChange={e => setBranch(e.target.value)}
-              placeholder={stack.name}
-              className="bg-input/50 border-border/60 font-mono text-sm"
+              id="stack-verify-max-attempts"
+              type="number"
+              min={1}
+              max={10}
+              value={verifyMaxAttempts}
+              onChange={e => setVerifyMaxAttempts(Math.min(10, Math.max(1, Number(e.target.value) || 1)))}
+              disabled={!verifyBeforePr}
+              className="bg-input/50 border-border/60 text-sm w-20"
             />
-          </FieldRow>
-          <p className="text-[10px] text-muted-foreground/60 mt-2">
-            Pushes and PRs targeting this branch drive this stack's plan/apply jobs in every project's
-            generated CI/CD workflow — independent of the other stacks' branches.
-          </p>
-
-          <div className="mt-5 pt-4 border-t border-border/40">
-            <Toggle
-              id="stack-verify-before-pr"
-              checked={verifyBeforePr}
-              onChange={setVerifyBeforePr}
-              label="Verify before opening PRs"
-              hint="Run terragrunt/terraform plan against generated infra for this stack before opening a PR. On failure, Claude attempts to patch and retry — if it still fails after the retry limit below, no PR is opened. Off by default since it requires this stack's infra to already be bootstrapped and adds time to PR creation."
-            />
-            <div className={`mt-3 flex items-center gap-2 ${verifyBeforePr ? '' : 'opacity-40 pointer-events-none'}`}>
-              <label htmlFor="stack-verify-max-attempts" className="text-xs text-muted-foreground">
-                Retry limit
-              </label>
-              <Input
-                id="stack-verify-max-attempts"
-                type="number"
-                min={1}
-                max={10}
-                value={verifyMaxAttempts}
-                onChange={e => setVerifyMaxAttempts(Math.min(10, Math.max(1, Number(e.target.value) || 1)))}
-                disabled={!verifyBeforePr}
-                className="bg-input/50 border-border/60 text-sm w-20"
-              />
-              <span className="text-[10px] text-muted-foreground/60">
-                attempts before giving up and reporting the failure (1–10)
-              </span>
-            </div>
-          </div>
-
-          <div className="mt-5 pt-4 border-t border-border/40">
-            <FieldRow
-              id="stack-module-version"
-              label="Terraform module version"
-              hint="Which version of Canary's vendored Terraform modules new landing zones on this stack are generated with. Changing this doesn't touch anything already deployed — use 'Hard refresh modules' below to re-sync existing landing zones to the newly selected version."
-            >
-              <div className="flex items-center gap-2">
-                <NativeSelect
-                  id="stack-module-version"
-                  value={moduleVersion}
-                  onChange={setModuleVersion}
-                  className="max-w-[160px]"
-                >
-                  {moduleVersions.map(v => (
-                    <option key={v.version} value={v.version}>{v.version}</option>
-                  ))}
-                </NativeSelect>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={hardRefreshModules}
-                  disabled={refreshStatus === 'refreshing' || moduleVersion !== stack.module_version}
-                  className="border-border/60"
-                >
-                  {refreshStatus === 'refreshing' ? 'Refreshing…' : 'Hard refresh modules'}
-                </Button>
-              </div>
-            </FieldRow>
-            {moduleVersion !== stack.module_version && (
-              <p className="text-[11px] text-muted-foreground mt-2">Save the stack before refreshing — refresh always uses the saved version.</p>
-            )}
-            {refreshStatus === 'done' && (
-              <p className={`text-[11px] mt-2 ${refreshPrUrl ? 'text-foreground' : 'text-muted-foreground'}`}>
-                {refreshPrUrl ? (
-                  <>
-                    {refreshMessage}{' '}
-                    <a href={refreshPrUrl} target="_blank" rel="noreferrer" className="text-primary hover:text-primary/80 underline">
-                      View PR
-                    </a>
-                  </>
-                ) : (
-                  `✓ ${refreshMessage}`
-                )}
-              </p>
-            )}
-            {refreshStatus === 'error' && (
-              <p className="text-[11px] text-destructive mt-2">{refreshMessage}</p>
-            )}
+            <span className="text-[10px] text-muted-foreground/60">
+              attempts before giving up and reporting the failure (1–10)
+            </span>
           </div>
         </CardContent>
       </Card>
@@ -577,11 +474,9 @@ export function StacksTab() {
   const [newStackName, setNewStackName] = useState('')
   const [addError, setAddError] = useState('')
   const [adding, setAdding] = useState(false)
-  const [moduleVersions, setModuleVersions] = useState<ModuleVersion[]>([])
 
   useEffect(() => {
     load()
-    api.listModuleVersions().then(setModuleVersions).catch(() => {})
   }, [])
 
   async function load(preferId?: string) {
@@ -686,7 +581,6 @@ export function StacksTab() {
         <StackDetail
           stack={selected}
           isOnly={stacks.length <= 1}
-          moduleVersions={moduleVersions}
           onChanged={() => load(selected.id)}
         />
       ) : (

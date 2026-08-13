@@ -5,6 +5,7 @@ import type {
   OrgSettings,
   StackOut,
   ProjectOut,
+  DataClassificationOut,
   GitHubRepoOut,
   DbtRepoOut,
   Topology,
@@ -37,10 +38,8 @@ export const MOCK_STACKS: StackOut[] = [
   {
     id: 'mock-stack-main',
     name: 'main',
-    branch: 'main',
     verify_before_pr: false,
     verify_max_attempts: 3,
-    module_version: '1.0.0',
     sort_order: 0,
     is_default: true,
     warehouse: {
@@ -72,14 +71,55 @@ export const MOCK_PROJECT: ProjectOut = {
   version_control_created: true,
   cicd_created: true,
   infrastructure_bootstrapped: true,
+  default_retention_policy: '1-year',
   created_at: new Date().toISOString(),
 }
+
+export const MOCK_DATA_CLASSIFICATIONS: DataClassificationOut[] = [
+  {
+    id: 'mock-class-public',
+    name: 'public',
+    description: 'No restrictions — safe to share externally.',
+    is_default: false,
+    sort_order: 0,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  },
+  {
+    id: 'mock-class-internal',
+    name: 'internal',
+    description: 'Not for external sharing, but no sensitive personal data.',
+    is_default: true,
+    sort_order: 1,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  },
+  {
+    id: 'mock-class-confidential',
+    name: 'confidential',
+    description: 'Contains PII (emails, names) or other sensitive business data.',
+    is_default: false,
+    sort_order: 2,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  },
+  {
+    id: 'mock-class-restricted',
+    name: 'restricted',
+    description: 'Highly sensitive — payment details, credentials, health data.',
+    is_default: false,
+    sort_order: 3,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  },
+]
 
 export const MOCK_REPO: GitHubRepoOut = {
   id: 'mock-repo-1',
   project_name: 'canary-demo',
   repo_full_name: 'canary-demo/data-platform',
-  branch: 'develop',
+  branch: 'main',
+  module_version: '1.0.0',
   api_url: 'https://api.github.com',
   infrastructure_base_path: 'infrastructure',
   auto_merge: false,

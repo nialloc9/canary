@@ -15,6 +15,7 @@ from app.schemas.project import (
     ProjectCiCdResponse,
     ProjectBootstrapRequest,
     ProjectBootstrapResponse,
+    ProjectSettingsUpdate,
     StackStateOut,
 )
 import app.tools.terraform.templates as templates
@@ -62,6 +63,28 @@ async def get_project(
     account_id: str = Depends(get_current_account_id),
 ):
     return await _get_project_or_404(account_id, db)
+
+
+# Kept in sync with LandingZoneTool._lifecycle_days' keys — every value this
+# accepts must have a lifecycle-days mapping there or retention math breaks.
+_VALID_RETENTION_POLICIES = {"30-day", "90-day", "1-year", "7-year", "indefinite"}
+
+
+@router.put("/current/settings", response_model=ProjectOut)
+async def update_project_settings(
+    payload: ProjectSettingsUpdate,
+    db: AsyncSession = Depends(get_db),
+    account_id: str = Depends(get_current_account_id),
+):
+    project = await _get_project_or_404(account_id, db)
+    if payload.default_retention_policy is not None and payload.default_retention_policy not in _VALID_RETENTION_POLICIES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"default_retention_policy must be one of {sorted(_VALID_RETENTION_POLICIES)} or null",
+        )
+    project.default_retention_policy = payload.default_retention_policy
+    await db.flush()
+    return project
 
 
 @router.post("/cicd", response_model=ProjectCiCdResponse, status_code=201)
@@ -127,7 +150,6 @@ async def _create_cicd_github_actions(
     workflow_stacks = [
         {
             "name": s.name,
-            "branch": s.branch,
             "region": state_backend_by_stack[s.id].state_region if s.id in state_backend_by_stack else (s.cloud_region or "eu-west-1"),
             "sf_organization_name": s.sf_organization_name,
             "sf_account_name": s.sf_account_name,
@@ -139,9 +161,11 @@ async def _create_cicd_github_actions(
     workflow = templates.ci_workflow(
         stacks=workflow_stacks,
         infrastructure_base_path=repo.infrastructure_base_path,
+        branch=repo.branch,
     )
     bootstrap_workflow_yaml = templates.bootstrap_workflow(
-        stacks=[{"name": s["name"], "branch": s["branch"], "region": s["region"]} for s in workflow_stacks],
+        stacks=[{"name": s["name"], "region": s["region"]} for s in workflow_stacks],
+        branch=repo.branch,
     )
 
     slug = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -278,7 +302,6 @@ async def _create_cicd_circleci(
     workflow_stacks = [
         {
             "name": s.name,
-            "branch": s.branch,
             "region": state_backend_by_stack[s.id].state_region if s.id in state_backend_by_stack else (s.cloud_region or "eu-west-1"),
             "circleci_context": s.circleci_context,
         }
@@ -289,6 +312,7 @@ async def _create_cicd_circleci(
         infra_stacks=workflow_stacks,
         bootstrap_stacks=workflow_stacks,
         infrastructure_base_path=repo.infrastructure_base_path,
+        branch=repo.branch,
     )
 
     slug = datetime.now().strftime("%Y%m%d-%H%M%S")

@@ -10,6 +10,7 @@ class GitHubRepoConnect(BaseModel):
 
     repo_full_name: str
     branch: str | None = None
+    module_version: str | None = None
     token: str | None = None
     api_url: str | None = None
     infrastructure_base_path: str | None = None
@@ -44,6 +45,7 @@ class GitHubRepoOut(BaseModel):
     project_name: str
     repo_full_name: str
     branch: str
+    module_version: str
     api_url: str
     infrastructure_base_path: str
     auto_merge: bool

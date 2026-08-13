@@ -12,8 +12,10 @@ from app.schemas.github import (
     GitHubCreateRepoRequest,
     GitHubCreateRepoResponse,
 )
-from app.services.branch_lookup import get_dev_prod_branches
+from app.schemas.stack import ModuleVersionOut, ModuleRefreshResponse
 from app.services.github_service import GitHubService, GitHubError
+from app.services.module_versions_service import list_module_versions, module_version_exists
+from app.services.module_refresh_service import hard_refresh_modules, ModuleRefreshError
 
 router = APIRouter(prefix="/github", tags=["github"])
 
@@ -74,7 +76,10 @@ async def connect_repo(
     if effective_token is None:
         raise HTTPException(status_code=422, detail="A GitHub token is required to connect a new repository")
 
-    branch = _resolve(payload.branch, "branch", "develop")
+    branch = _resolve(payload.branch, "branch", "main")
+    module_version = _resolve(payload.module_version, "module_version", "1.0.0")
+    if not module_version_exists(module_version):
+        raise HTTPException(status_code=422, detail=f"Unknown module version '{module_version}'")
     api_url = _resolve(payload.api_url, "api_url", "https://api.github.com")
     base_path = _resolve(payload.infrastructure_base_path, "infrastructure_base_path", "infrastructure")
     auto_merge = _resolve(payload.auto_merge, "auto_merge", False)
@@ -95,21 +100,22 @@ async def connect_repo(
     except GitHubError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
-    dev_branch, prod_branch = await get_dev_prod_branches(account_id, db)
     try:
-        if not await svc.branch_exists(dev_branch):
-            await svc.create_branch_from(dev_branch, prod_branch)
+        if not await svc.branch_exists(branch):
+            raise HTTPException(
+                status_code=422,
+                detail=f"'{branch}' branch doesn't exist in {payload.repo_full_name} — create it first "
+                "or connect a different branch.",
+            )
     except GitHubError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail=f"'{dev_branch}' branch doesn't exist and couldn't be created from '{prod_branch}': {exc}",
-        )
+        raise HTTPException(status_code=422, detail=str(exc))
 
     project_name = await _project_slug(account_id, db)
 
     if record:
         record.repo_full_name = payload.repo_full_name
         record.branch = branch
+        record.module_version = module_version
         record.token = effective_token
         record.api_url = api_url
         record.infrastructure_base_path = base_path
@@ -124,6 +130,7 @@ async def connect_repo(
             project_name=project_name,
             repo_full_name=payload.repo_full_name,
             branch=branch,
+            module_version=module_version,
             token=effective_token,
             api_url=api_url,
             infrastructure_base_path=base_path,
@@ -180,3 +187,33 @@ async def disconnect_repo(
     if not record:
         raise HTTPException(status_code=404, detail="No GitHub repo connected for this account")
     await db.delete(record)
+
+
+@router.get("/repos/module-versions", response_model=list[ModuleVersionOut])
+async def list_repo_module_versions():
+    return [ModuleVersionOut(**v.model_dump()) for v in list_module_versions()]
+
+
+@router.post("/repos/refresh-modules", response_model=ModuleRefreshResponse)
+async def refresh_modules(
+    db: AsyncSession = Depends(get_db),
+    account_id: str = Depends(get_current_account_id),
+):
+    result = await db.execute(select(GitHubRepo).where(GitHubRepo.account_id == account_id))
+    record = result.scalar_one_or_none()
+    if not record:
+        raise HTTPException(status_code=404, detail="No GitHub repo connected for this account")
+
+    try:
+        refresh_result = await hard_refresh_modules(record)
+    except ModuleRefreshError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    if refresh_result.pr_url is None:
+        return ModuleRefreshResponse(pr_url=None, files_removed=0, files_added=0, message="Already up to date")
+
+    return ModuleRefreshResponse(
+        pr_url=refresh_result.pr_url,
+        files_removed=refresh_result.files_removed,
+        files_added=refresh_result.files_added,
+    )

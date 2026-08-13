@@ -1,14 +1,15 @@
 import { useState, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { AppLayout } from '../components/AppLayout'
-import { api, OrgSettings, ProjectOut, GitHubRepoOut, GitHubRepoConnect, DbtRepoOut, DbtRepoConnect } from '../api/client'
+import { api, OrgSettings, ProjectOut, GitHubRepoOut, GitHubRepoConnect, DbtRepoOut, DbtRepoConnect, ModuleVersion } from '../api/client'
 import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
 import { Card, CardContent, CardFooter, CardHeader, CardTitle, CardDescription } from '../components/ui/card'
-import { SaveStatus, StatusMessage, FieldRow, Toggle, StatusBadge } from '../components/admin/shared'
+import { SaveStatus, StatusMessage, FieldRow, Toggle, StatusBadge, NativeSelect } from '../components/admin/shared'
 import { StacksTab } from './admin/StacksTab'
+import { DefaultsTab } from './admin/DefaultsTab'
 
-type Tab = 'organization' | 'stacks' | 'projects'
+type Tab = 'organization' | 'stacks' | 'projects' | 'defaults'
 
 // ── Organization tab ──────────────────────────────────────────────────────────
 
@@ -72,7 +73,7 @@ function OrgTab() {
 
 const EMPTY_FORM: GitHubRepoConnect = {
   repo_full_name: '',
-  branch: 'develop',
+  branch: 'main',
   token: '',
   api_url: 'https://api.github.com',
   infrastructure_base_path: 'infrastructure',
@@ -89,9 +90,14 @@ function ProjectsTab() {
   const [status, setStatus] = useState<SaveStatus>('idle')
   const [error, setError] = useState('')
   const [disconnecting, setDisconnecting] = useState(false)
+  const [moduleVersions, setModuleVersions] = useState<ModuleVersion[]>([])
+  const [refreshStatus, setRefreshStatus] = useState<'idle' | 'refreshing' | 'done' | 'error'>('idle')
+  const [refreshMessage, setRefreshMessage] = useState('')
+  const [refreshPrUrl, setRefreshPrUrl] = useState<string | null>(null)
 
   useEffect(() => {
     load()
+    api.listModuleVersions().then(setModuleVersions).catch(() => {})
   }, [])
 
   useEffect(() => {
@@ -100,6 +106,7 @@ function ProjectsTab() {
         ? {
             repo_full_name: repo.repo_full_name,
             branch: repo.branch,
+            module_version: repo.module_version,
             token: '',
             api_url: repo.api_url,
             infrastructure_base_path: repo.infrastructure_base_path,
@@ -110,7 +117,29 @@ function ProjectsTab() {
           }
         : EMPTY_FORM
     )
+    setRefreshStatus('idle')
+    setRefreshMessage('')
+    setRefreshPrUrl(null)
   }, [repo])
+
+  async function hardRefreshModules() {
+    setRefreshStatus('refreshing')
+    setRefreshMessage('')
+    setRefreshPrUrl(null)
+    try {
+      const result = await api.refreshRepoModules()
+      setRefreshStatus('done')
+      setRefreshPrUrl(result.pr_url)
+      setRefreshMessage(
+        result.pr_url
+          ? `Opened a PR removing ${result.files_removed} file(s) and adding ${result.files_added} file(s).`
+          : result.message ?? 'Already up to date'
+      )
+    } catch (e) {
+      setRefreshStatus('error')
+      setRefreshMessage(e instanceof Error ? e.message : 'Failed to refresh modules')
+    }
+  }
 
   async function load() {
     try {
@@ -183,13 +212,13 @@ function ProjectsTab() {
             <FieldRow
               id="repo-branch"
               label="Branch"
-              hint="Base branch used when opening PRs for this repo connection."
+              hint="The single trunk branch every stack's PRs target (GitHub Flow) — same branch across every stack, not one per environment."
             >
               <Input
                 id="repo-branch"
                 value={form.branch}
                 onChange={e => setForm(f => ({ ...f, branch: e.target.value }))}
-                placeholder="develop"
+                placeholder="main"
                 className="bg-input/50 border-border/60 font-mono text-sm"
               />
             </FieldRow>
@@ -219,6 +248,58 @@ function ProjectsTab() {
                 className="bg-input/50 border-border/60 font-mono text-sm"
               />
             </FieldRow>
+          </div>
+
+          <div className="pt-4 border-t border-border/40">
+            <FieldRow
+              id="repo-module-version"
+              label="Terraform module version"
+              hint="Which version of Canary's vendored Terraform modules new landing zones are generated with — shared by every stack. Changing this doesn't touch anything already deployed — use 'Hard refresh modules' below to re-sync existing landing zones to the newly selected version."
+            >
+              <div className="flex items-center gap-2">
+                <NativeSelect
+                  id="repo-module-version"
+                  value={form.module_version ?? moduleVersions[moduleVersions.length - 1]?.version ?? ''}
+                  onChange={v => setForm(f => ({ ...f, module_version: v }))}
+                  className="max-w-[160px]"
+                >
+                  {moduleVersions.map(v => (
+                    <option key={v.version} value={v.version}>{v.version}</option>
+                  ))}
+                </NativeSelect>
+                {repo && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={hardRefreshModules}
+                    disabled={refreshStatus === 'refreshing' || form.module_version !== repo.module_version}
+                    className="border-border/60"
+                  >
+                    {refreshStatus === 'refreshing' ? 'Refreshing…' : 'Hard refresh modules'}
+                  </Button>
+                )}
+              </div>
+            </FieldRow>
+            {repo && form.module_version !== repo.module_version && (
+              <p className="text-[11px] text-muted-foreground mt-2">Save before refreshing — refresh always uses the saved version.</p>
+            )}
+            {refreshStatus === 'done' && (
+              <p className={`text-[11px] mt-2 ${refreshPrUrl ? 'text-foreground' : 'text-muted-foreground'}`}>
+                {refreshPrUrl ? (
+                  <>
+                    {refreshMessage}{' '}
+                    <a href={refreshPrUrl} target="_blank" rel="noreferrer" className="text-primary hover:text-primary/80 underline">
+                      View PR
+                    </a>
+                  </>
+                ) : (
+                  `✓ ${refreshMessage}`
+                )}
+              </p>
+            )}
+            {refreshStatus === 'error' && (
+              <p className="text-[11px] text-destructive mt-2">{refreshMessage}</p>
+            )}
           </div>
 
           <div className="space-y-3 pt-1">
@@ -585,9 +666,10 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'organization', label: 'Organization' },
   { id: 'stacks', label: 'Stacks' },
   { id: 'projects', label: 'Projects' },
+  { id: 'defaults', label: 'Landing zone defaults' },
 ]
 
-const TAB_IDS: Tab[] = ['organization', 'stacks', 'projects']
+const TAB_IDS: Tab[] = ['organization', 'stacks', 'projects', 'defaults']
 
 export function AdminPage() {
   const [searchParams, setSearchParams] = useSearchParams()
@@ -629,6 +711,7 @@ export function AdminPage() {
             {activeTab === 'organization' && <OrgTab />}
             {activeTab === 'stacks' && <StacksTab />}
             {activeTab === 'projects' && <ProjectsTab />}
+            {activeTab === 'defaults' && <DefaultsTab />}
           </div>
         </div>
       </div>

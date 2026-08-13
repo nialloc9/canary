@@ -19,6 +19,10 @@ class Project(Base):
     version_control_created: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     cicd_created: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     infrastructure_bootstrapped: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Applied by create_landing_zone whenever the caller doesn't supply
+    # retention_policy explicitly — null means "no default configured yet",
+    # not "indefinite", so the agent still has to ask in that case.
+    default_retention_policy: Mapped[str | None] = mapped_column(String(20), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
@@ -57,10 +61,17 @@ class GitHubRepo(Base):
     account_id: Mapped[str] = mapped_column(ForeignKey("accounts.id"), nullable=False, index=True)
     project_name: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
     repo_full_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    branch: Mapped[str] = mapped_column(String(255), nullable=False, default="develop")
+    # GitHub Flow: the single trunk branch every stack's PRs target (e.g.
+    # 'main') — user-configurable in Admin, same branch across every stack.
+    branch: Mapped[str] = mapped_column(String(255), nullable=False, default="main")
     token: Mapped[str] = mapped_column(Text, nullable=False)
     api_url: Mapped[str] = mapped_column(String(512), nullable=False, default="https://api.github.com")
     infrastructure_base_path: Mapped[str] = mapped_column(String(512), nullable=False, default="infrastructure")
+    # Which terraform/modules/<stack>/<version>/ is vendored for every stack —
+    # same versioned-folder-copy pattern as DbtRepo.scaffold_version. One
+    # value per account/repo, shared across all stacks (was per-Stack before
+    # the GitHub Flow migration).
+    module_version: Mapped[str] = mapped_column(String(20), nullable=False, default="1.0.0")
     auto_merge: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     create_cicd: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     # "github_actions" or "circleci". github_actions gets secret *values*
@@ -107,7 +118,7 @@ class DbtRepo(Base):
     # this is only here for the rare case someone wants it nested.
     dbt_base_path: Mapped[str] = mapped_column(String(512), nullable=False, default=".")
     # Which dbt/scaffold/<stack>/<version>/ was last vendored into this repo —
-    # same versioned-folder-copy pattern as Stack.module_version for Terraform.
+    # same versioned-folder-copy pattern as GitHubRepo.module_version for Terraform.
     scaffold_version: Mapped[str] = mapped_column(String(20), nullable=False, default="1.0.0")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)

@@ -10,13 +10,15 @@ import type {
   StackUpdate,
   ConnectionTestResult,
   ProjectOut,
+  DataClassificationOut,
+  DataClassificationCreate,
+  DataClassificationUpdate,
   GitHubRepoOut,
   GitHubRepoConnect,
   DbtRepoOut,
   DbtRepoConnect,
   DbtRepoConnectResult,
   DbtScaffoldRefreshResult,
-  ReleaseResult,
   Topology,
   AccessKeys,
   ModuleVersion,
@@ -30,6 +32,7 @@ import {
   MOCK_ORG,
   MOCK_STACKS,
   MOCK_PROJECT,
+  MOCK_DATA_CLASSIFICATIONS,
   MOCK_REPO,
   MOCK_DBT_REPO,
   MOCK_TOPOLOGY,
@@ -43,6 +46,8 @@ let mockStacks: StackOut[] = MOCK_STACKS.map(s => ({ ...s, warehouse: { ...s.war
 let mockStackCounter = mockStacks.length
 let mockConversations: ConversationOut[] = MOCK_CONVERSATIONS.map(c => ({ ...c, messages: [...(c.messages ?? [])] }))
 let mockProject: ProjectOut = { ...MOCK_PROJECT }
+let mockClassifications: DataClassificationOut[] = MOCK_DATA_CLASSIFICATIONS.map(c => ({ ...c }))
+let mockClassificationCounter = mockClassifications.length
 let mockRepo: GitHubRepoOut | null = { ...MOCK_REPO }
 let mockDbtRepo: DbtRepoOut | null = { ...MOCK_DBT_REPO }
 
@@ -174,10 +179,8 @@ export const mockApi = {
     const created: StackOut = {
       id: `mock-stack-${++mockStackCounter}`,
       name: data.name,
-      branch: data.branch ?? data.name,
       verify_before_pr: data.verify_before_pr ?? false,
       verify_max_attempts: data.verify_max_attempts ?? 3,
-      module_version: data.module_version ?? MOCK_MODULE_VERSIONS[MOCK_MODULE_VERSIONS.length - 1].version,
       sort_order: mockStacks.length,
       is_default: false,
       warehouse: {
@@ -213,10 +216,8 @@ export const mockApi = {
     mockStacks[index] = {
       ...current,
       name: data.name ?? current.name,
-      branch: data.branch ?? current.branch,
       verify_before_pr: data.verify_before_pr ?? current.verify_before_pr,
       verify_max_attempts: data.verify_max_attempts ?? current.verify_max_attempts,
-      module_version: data.module_version ?? current.module_version,
       warehouse: { ...current.warehouse, ...data.warehouse },
       cloud: { ...current.cloud, ...data.cloud },
       updated_at: new Date().toISOString(),
@@ -247,7 +248,7 @@ export const mockApi = {
     return MOCK_MODULE_VERSIONS.map(v => ({ ...v }))
   },
 
-  async refreshStackModules(_id: string): Promise<ModuleRefreshResult> {
+  async refreshRepoModules(): Promise<ModuleRefreshResult> {
     await delay(1500)
     return { pr_url: null, files_removed: 0, files_added: 0, message: 'Already up to date' }
   },
@@ -257,16 +258,6 @@ export const mockApi = {
     const byId = new Map(mockStacks.map(s => [s.id, s]))
     mockStacks = stackIds.map((id, index) => ({ ...byId.get(id)!, sort_order: index }))
     return mockStacks.map(s => ({ ...s }))
-  },
-
-  async releaseStack(id: string, target: 'prod' | 'develop', _resolutions?: Record<string, 'ours' | 'theirs'>): Promise<ReleaseResult> {
-    await delay(1500)
-    const stack = mockStacks.find(s => s.id === id)
-    if (!stack) throw new Error('Stack not found')
-    return {
-      pr_urls: [`https://github.com/${mockRepo?.repo_full_name ?? 'canary-demo/data-platform'}/pull/${Math.floor(Math.random() * 900) + 100}`],
-      branch: target === 'prod' ? 'main' : stack.branch,
-    }
   },
 
   async getStackTopology(_id: string, _refresh = false): Promise<Topology> {
@@ -284,13 +275,57 @@ export const mockApi = {
     return [{ ...mockProject }]
   },
 
+  async updateProjectSettings(data: { default_retention_policy: string | null }): Promise<ProjectOut> {
+    await delay(300)
+    mockProject = { ...mockProject, default_retention_policy: data.default_retention_policy }
+    return { ...mockProject }
+  },
+
+  async listDataClassifications(): Promise<DataClassificationOut[]> {
+    await delay(200)
+    return mockClassifications.map(c => ({ ...c }))
+  },
+
+  async createDataClassification(data: DataClassificationCreate): Promise<DataClassificationOut> {
+    await delay(300)
+    if (data.is_default) mockClassifications = mockClassifications.map(c => ({ ...c, is_default: false }))
+    const record: DataClassificationOut = {
+      id: `mock-class-${++mockClassificationCounter}`,
+      name: data.name,
+      description: data.description ?? null,
+      is_default: data.is_default ?? false,
+      sort_order: mockClassifications.length,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    }
+    mockClassifications = [...mockClassifications, record]
+    return { ...record }
+  },
+
+  async updateDataClassification(id: string, data: DataClassificationUpdate): Promise<DataClassificationOut> {
+    await delay(300)
+    if (data.is_default) mockClassifications = mockClassifications.map(c => ({ ...c, is_default: false }))
+    mockClassifications = mockClassifications.map(c =>
+      c.id === id ? { ...c, ...data, updated_at: new Date().toISOString() } : c
+    )
+    const updated = mockClassifications.find(c => c.id === id)
+    if (!updated) throw new Error('Data classification not found')
+    return { ...updated }
+  },
+
+  async deleteDataClassification(id: string): Promise<void> {
+    await delay(300)
+    mockClassifications = mockClassifications.filter(c => c.id !== id)
+  },
+
   async connectRepo(data: GitHubRepoConnect): Promise<GitHubRepoOut> {
     await delay(700)
     mockRepo = {
       id: mockRepo?.id ?? 'mock-repo-1',
       project_name: mockProject.name,
       repo_full_name: data.repo_full_name,
-      branch: data.branch || 'develop',
+      branch: data.branch || 'main',
+      module_version: data.module_version || mockRepo?.module_version || MOCK_MODULE_VERSIONS[MOCK_MODULE_VERSIONS.length - 1].version,
       api_url: data.api_url || 'https://api.github.com',
       infrastructure_base_path: data.infrastructure_base_path || 'infrastructure',
       auto_merge: data.auto_merge ?? false,

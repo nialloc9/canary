@@ -113,7 +113,7 @@ class RemoveTerragruntBlockTool(BaseTool):
                 continue
             clone_dir = None
             try:
-                clone_dir = clone_repo(repo.token, repo.repo_full_name, stack.branch)
+                clone_dir = clone_repo(repo.token, repo.repo_full_name, repo.branch)
                 base = self._env_dir(clone_dir, repo.infrastructure_base_path, stack.name)
                 for component in found[stack.name]:
                     shutil.rmtree(base / component, ignore_errors=True)
@@ -132,12 +132,12 @@ class RemoveTerragruntBlockTool(BaseTool):
                 svc = GitHubService(
                     token=repo.token,
                     repo_full_name=repo.repo_full_name,
-                    branch=stack.branch,
+                    branch=repo.branch,
                     api_url=repo.api_url,
                 )
                 pr_url = await svc.open_branch_pr(
                     head=feature_branch,
-                    base=stack.branch,
+                    base=repo.branch,
                     title=f"chore(terragrunt): remove {', '.join(found[stack.name])} from {stack.name}",
                     body=(
                         f"## Summary\n\n"
@@ -170,14 +170,14 @@ class RemoveTerragruntBlockTool(BaseTool):
         for stack in stacks:
             svc = GitHubService(
                 token=repo.token, repo_full_name=repo.repo_full_name,
-                branch=stack.branch, api_url=repo.api_url,
+                branch=repo.branch, api_url=repo.api_url,
             )
             present = []
             for block_name in block_names:
                 path = _repo_path(
                     repo.infrastructure_base_path, stack.name, "landing-zone", block_name, "terragrunt.hcl"
                 )
-                content = await svc.get_file_content(path, ref=stack.branch)
+                content = await svc.get_file_content(path, ref=repo.branch)
                 if content is not None:
                     present.append(block_name)
             if present:

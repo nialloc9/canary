@@ -2,6 +2,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.tools.base import BaseTool
 from app.tools.terraform.s3 import LandingZoneTool
+from app.tools.terraform.draft_tables import DraftLandingZoneTablesTool
 from app.tools.terraform.snowflake_pipe import SnowflakePipeTool
 from app.tools.terraform.update import UpdateLandingZoneTool
 from app.tools.terraform.remove import RemoveTerragruntBlockTool
@@ -18,6 +19,7 @@ class ToolRegistry:
 
     def _register_defaults(self, db: AsyncSession, account_id: str) -> None:
         self.register(LandingZoneTool(db, account_id))
+        self.register(DraftLandingZoneTablesTool(db, account_id))
         self.register(UpdateLandingZoneTool(db, account_id))
         self.register(RemoveTerragruntBlockTool(db, account_id))
         self.register(ListTerragruntBlocksTool(db, account_id))

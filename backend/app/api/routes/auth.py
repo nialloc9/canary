@@ -43,11 +43,12 @@ async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db))
     db.add(account)
     await db.flush()
 
-    # Every account gets a "dev" stack (tracks develop) and a "prod" stack (tracks
-    # main) — the release flow assumes both exist. "dev" is the default for new
-    # conversations/experimentation.
-    db.add(Stack(account_id=account.id, name="dev", branch="develop", sort_order=0, is_default=True))
-    db.add(Stack(account_id=account.id, name="prod", branch="main", sort_order=1, is_default=False))
+    # Every account gets a "dev" and a "prod" stack to start (GitHub Flow: both
+    # share the one trunk branch configured on GitHubRepo, not a branch of
+    # their own). Neither is marked default — the user picks a stack explicitly
+    # each time rather than one being silently assumed.
+    db.add(Stack(account_id=account.id, name="dev", sort_order=0, is_default=False))
+    db.add(Stack(account_id=account.id, name="prod", sort_order=1, is_default=False))
     await db.flush()
 
     user = User(

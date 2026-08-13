@@ -90,7 +90,7 @@ def _secret_suffix(stack_name: str) -> str:
     return stack_name.upper().replace("-", "_")
 
 
-def ci_workflow(stacks: list[dict], infrastructure_base_path: str) -> str:
+def ci_workflow(stacks: list[dict], infrastructure_base_path: str, branch: str) -> str:
     """Generate the canary-infrastructure-deploy workflow.
 
     Each stack gets its own plan/apply job pair, scoped to its own
@@ -99,6 +99,13 @@ def ci_workflow(stacks: list[dict], infrastructure_base_path: str) -> str:
     shared job (as used when there was only ever "dev"/"prod") can't
     express this; the Snowflake provider reads identity purely from env
     vars, not from Terragrunt inputs.
+
+    GitHub Flow: every stack shares the same trunk `branch` — there's no
+    per-stack branch left to gate a job on, so every stack's plan/apply job
+    runs on every PR/push to that branch regardless of which stack's own
+    subtree actually changed. Safe (an unchanged stack's `terragrunt apply`
+    is a no-op), just not maximally efficient; path-based per-job filtering
+    is a possible future optimization, not a correctness requirement.
     """
     secrets_doc = "\n".join(
         f"#   SNOWFLAKE_ORGANIZATION_NAME__{_secret_suffix(s['name'])} = {s['sf_organization_name']}\n"
@@ -142,15 +149,12 @@ def ci_workflow(stacks: list[dict], infrastructure_base_path: str) -> str:
         run: terragrunt run-all {action} --terragrunt-non-interactive
 '''
 
-    branches = sorted({s["branch"] for s in stacks})
-    branches_yaml = ", ".join(branches)
-
     plan_jobs = "\n".join(
-        _job(s, "plan", f"github.event_name == 'pull_request' && github.base_ref == '{s['branch']}'")
+        _job(s, "plan", "github.event_name == 'pull_request'")
         for s in stacks
     )
     apply_jobs = "\n".join(
-        _job(s, "apply", f"github.event_name == 'push' && github.ref == 'refs/heads/{s['branch']}'")
+        _job(s, "apply", "github.event_name == 'push'")
         for s in stacks
     )
 
@@ -158,11 +162,11 @@ def ci_workflow(stacks: list[dict], infrastructure_base_path: str) -> str:
 
 on:
   pull_request:
-    branches: [{branches_yaml}]
+    branches: [{branch}]
     paths:
       - "{infrastructure_base_path}/**"
   push:
-    branches: [{branches_yaml}]
+    branches: [{branch}]
     paths:
       - "{infrastructure_base_path}/**"
 
@@ -174,14 +178,14 @@ jobs:
 {apply_jobs}'''
 
 
-def bootstrap_workflow(stacks: list[dict]) -> str:
+def bootstrap_workflow(stacks: list[dict], branch: str) -> str:
     """Generate the canary-bootstrap workflow.
 
-    ``stacks`` must already be ordered by promotion order (i.e. account
-    sort_order). Plan jobs run independently in parallel; apply jobs are
-    chained so each stack only applies once the previous one has
-    succeeded — this generalizes the old fixed `apply-prod needs
-    [apply-dev]` dependency into an N-length chain.
+    GitHub Flow: every stack shares the same trunk `branch`, so plan/apply
+    jobs gate on event type only, and (unlike the old fixed `apply-prod
+    needs [apply-dev]` dependency, or its generalized N-length promotion
+    chain) every stack's apply now runs independently — there's no more
+    promotion order between stacks to preserve.
     """
 
     def _plan_job(stack: dict) -> str:
@@ -189,7 +193,7 @@ def bootstrap_workflow(stacks: list[dict]) -> str:
         return f'''  plan-{stack["name"]}:
     name: Terraform Plan ({stack["name"]})
     runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request' && github.base_ref == '{stack["branch"]}'
+    if: github.event_name == 'pull_request'
     env:
       AWS_ACCESS_KEY_ID: ${{{{ secrets.AWS_ACCESS_KEY_ID__{suffix} }}}}
       AWS_SECRET_ACCESS_KEY: ${{{{ secrets.AWS_SECRET_ACCESS_KEY__{suffix} }}}}
@@ -204,13 +208,12 @@ def bootstrap_workflow(stacks: list[dict]) -> str:
           terraform plan
 '''
 
-    def _apply_job(stack: dict, previous: dict | None) -> str:
+    def _apply_job(stack: dict) -> str:
         suffix = _secret_suffix(stack["name"])
-        needs = f'\n    needs: [apply-{previous["name"]}]' if previous else ""
         return f'''  apply-{stack["name"]}:
     name: Terraform Apply ({stack["name"]})
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/{stack["branch"]}'{needs}
+    if: github.event_name == 'push'
     env:
       AWS_ACCESS_KEY_ID: ${{{{ secrets.AWS_ACCESS_KEY_ID__{suffix} }}}}
       AWS_SECRET_ACCESS_KEY: ${{{{ secrets.AWS_SECRET_ACCESS_KEY__{suffix} }}}}
@@ -225,21 +228,18 @@ def bootstrap_workflow(stacks: list[dict]) -> str:
           terraform apply -auto-approve
 '''
 
-    branches_yaml = ", ".join(sorted({s["branch"] for s in stacks}))
     plan_jobs = "\n".join(_plan_job(s) for s in stacks)
-    apply_jobs = "\n".join(
-        _apply_job(s, stacks[i - 1] if i > 0 else None) for i, s in enumerate(stacks)
-    )
+    apply_jobs = "\n".join(_apply_job(s) for s in stacks)
 
     return f'''name: canary-bootstrap
 
 on:
   pull_request:
-    branches: [{branches_yaml}]
+    branches: [{branch}]
     paths:
       - "bootstrap/**"
   push:
-    branches: [{branches_yaml}]
+    branches: [{branch}]
     paths:
       - "bootstrap/**"
 
@@ -260,6 +260,7 @@ def circleci_config(
     infra_stacks: list[dict],
     bootstrap_stacks: list[dict],
     infrastructure_base_path: str,
+    branch: str,
 ) -> str:
     """Generate the single .circleci/config.yml covering both the
     infrastructure-deploy and bootstrap workflows.
@@ -272,10 +273,13 @@ def circleci_config(
 
     CircleCI has no native "on pull_request" trigger the way GitHub Actions
     does — pushes to any branch trigger a build regardless of PR state. The
-    closest equivalent used here: a stack's plan job runs on every branch
-    *except* its own deploy branch (i.e. feature branches / open PRs headed
-    towards it), and its apply job runs only on pushes to that branch
-    (i.e. after a PR merges).
+    closest equivalent used here: every stack's plan job runs on every
+    branch *except* the shared trunk `branch` (i.e. feature branches / open
+    PRs headed towards it), and every apply job runs only on pushes to
+    `branch` itself (i.e. after a PR merges) — GitHub Flow means this
+    filter is now the same single branch for every stack, not one per
+    stack, and there's no more promotion order between stacks to chain
+    apply jobs on (each applies independently).
     """
 
     def _job_block(
@@ -307,11 +311,11 @@ def circleci_config(
         _job_block(
             name=f"plan-{s['name']}", job="terragrunt-run",
             working_directory=f"{infrastructure_base_path}/{s['name']}", action="plan",
-            context=s["circleci_context"], region=s["region"], branch=s["branch"], only=False,
+            context=s["circleci_context"], region=s["region"], branch=branch, only=False,
         ) + _job_block(
             name=f"apply-{s['name']}", job="terragrunt-run",
             working_directory=f"{infrastructure_base_path}/{s['name']}", action="apply -auto-approve",
-            context=s["circleci_context"], region=s["region"], branch=s["branch"], only=True,
+            context=s["circleci_context"], region=s["region"], branch=branch, only=True,
         )
         for s in infra_stacks
     )
@@ -320,14 +324,13 @@ def circleci_config(
         _job_block(
             name=f"plan-bootstrap-{s['name']}", job="terraform-run",
             working_directory=f"bootstrap/{s['name']}", action="plan",
-            context=s["circleci_context"], region=s["region"], branch=s["branch"], only=False,
+            context=s["circleci_context"], region=s["region"], branch=branch, only=False,
         ) + _job_block(
             name=f"apply-bootstrap-{s['name']}", job="terraform-run",
             working_directory=f"bootstrap/{s['name']}", action="apply -auto-approve",
-            context=s["circleci_context"], region=s["region"], branch=s["branch"], only=True,
-            requires=[f"apply-bootstrap-{bootstrap_stacks[i - 1]['name']}"] if i > 0 else None,
+            context=s["circleci_context"], region=s["region"], branch=branch, only=True,
         )
-        for i, s in enumerate(bootstrap_stacks)
+        for s in bootstrap_stacks
     )
 
     contexts_doc = "\n".join(
@@ -611,7 +614,13 @@ def si(
     name: str,
     s3_stage_prefix: str,
     file_format_type: str,
+    db_landing_zone: str | None = None,
 ) -> str:
+    # db_landing_zone lets this stage attach to another landing zone's already-
+    # provisioned {db_landing_zone}-db/-db-arch (reusing its database and medallion
+    # schemas) instead of this landing zone's own — defaults to `name` (the normal
+    # case: this landing zone owns its database).
+    db_landing_zone = db_landing_zone or name
     return f'''include "base" {{
   path = find_in_parent_folders()
 }}
@@ -631,16 +640,16 @@ dependency "lz" {{
 }}
 
 dependency "db" {{
-  config_path = "../{name}-db"
+  config_path = "../{db_landing_zone}-db"
 
   mock_outputs = {{
-    name = "MOCK_{name.upper().replace('-', '_')}"
+    name = "MOCK_{db_landing_zone.upper().replace('-', '_')}"
   }}
   mock_outputs_allowed_terraform_commands = ["validate", "plan"]
 }}
 
 dependency "db_arch" {{
-  config_path = "../{name}-db-arch"
+  config_path = "../{db_landing_zone}-db-arch"
 
   mock_outputs = {{
     landing_zone_schema_name = "MOCK_LANDING_ZONE"
@@ -667,17 +676,25 @@ def pipe_from_landing_zone(
     target_table: str,
     filter_prefix: str = "",
     filter_suffix: str = "",
+    db_landing_zone: str | None = None,
 ) -> str:
     """Snowpipe terragrunt config, used both inline by `create_landing_zone`
     and standalone by `create_snowflake_pipe` (retrofitting an existing
-    landing zone). Always wires up to the sibling {name}-db/-db-arch/-lz/-si
-    components via dependency blocks rather than accepting literal database/
-    schema strings — those names are transformed by the db/medallion-arch
-    modules (uppercased, schema suffixed with its data classification), so
-    a hand-typed literal is one typo away from a Snowflake "object does not
-    exist" failure at apply time. Deriving them here means the pipe can
-    never drift out of sync with the landing zone it belongs to.
+    landing zone). Always wires up to the sibling {name}-lz/-si and
+    {db_landing_zone}-db/-db-arch components via dependency blocks rather
+    than accepting literal database/schema strings — those names are
+    transformed by the db/medallion-arch modules (uppercased, schema
+    suffixed with its data classification), so a hand-typed literal is one
+    typo away from a Snowflake "object does not exist" failure at apply
+    time. Deriving them here means the pipe can never drift out of sync
+    with the landing zone it belongs to.
+
+    db_landing_zone defaults to `name` (this landing zone owns its own
+    database) — pass a different landing zone's name when this one was
+    created with existing_database_landing_zone set, so the pipe's Bronze
+    table lands in the database/schema that's actually deployed.
     """
+    db_landing_zone = db_landing_zone or name
     optional_inputs = ""
     if filter_prefix:
         optional_inputs += f'\n  filter_prefix = "{filter_prefix}"'
@@ -702,16 +719,16 @@ dependency "lz" {{
 }}
 
 dependency "db" {{
-  config_path = "../{name}-db"
+  config_path = "../{db_landing_zone}-db"
 
   mock_outputs = {{
-    name = "MOCK_{name.upper().replace('-', '_')}"
+    name = "MOCK_{db_landing_zone.upper().replace('-', '_')}"
   }}
   mock_outputs_allowed_terraform_commands = ["validate", "plan"]
 }}
 
 dependency "db_arch" {{
-  config_path = "../{name}-db-arch"
+  config_path = "../{db_landing_zone}-db-arch"
 
   mock_outputs = {{
     landing_zone_schema_name = "MOCK_LANDING_ZONE"

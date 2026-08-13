@@ -66,20 +66,35 @@ def _size_stats(sample_files: list[dict]) -> tuple[int, int, int]:
 async def infer_profile(
     landing_zone_name: str,
     sample_files: list[dict],
+    table_name: str | None = None,
     data_description: str | None = None,
     file_format: str | None = None,
     expected_size_bytes: int | None = None,
     min_size_bytes: int | None = None,
     max_size_bytes: int | None = None,
     columns: list[dict] | None = None,
+    owner: str | None = None,
+    refresh_rate: str | None = None,
+    data_classification: str | None = None,
+    s3_prefix: str | None = None,
 ) -> dict:
-    """Resolve a full data profile from whatever the user explicitly supplied,
-    filling in everything else from the sample file(s). Deterministic where
-    possible (size stats, format sniffing); the LLM is only used for the
-    genuinely semantic parts (description, per-column meaning) and only when
-    the user didn't already supply them."""
+    """Resolve a full data profile for one table from whatever the user
+    explicitly supplied, filling in everything else from the sample file(s).
+    Deterministic where possible (size stats, format sniffing); the LLM is
+    only used for the genuinely semantic parts (description, per-column
+    meaning) and only when the user didn't already supply them.
+
+    owner/refresh_rate/data_classification/s3_prefix are never inferred —
+    they're either given by the user or left null; there's nothing in a
+    sample file that could tell you who owns a table or how often it
+    refreshes."""
     inferred_min, inferred_max, inferred_expected = _size_stats(sample_files)
     resolved = {
+        "table_name": table_name,
+        "owner": owner,
+        "refresh_rate": refresh_rate,
+        "data_classification": data_classification,
+        "s3_prefix": s3_prefix,
         "file_format": file_format or _sniff_format(sample_files),
         "min_size_bytes": min_size_bytes if min_size_bytes is not None else inferred_min,
         "max_size_bytes": max_size_bytes if max_size_bytes is not None else inferred_max,
@@ -106,7 +121,7 @@ async def infer_profile(
         for i, f in enumerate(sample_files[:_MAX_SAMPLES_IN_PROMPT])
     )
     prompt = _INFER_PROMPT.format(
-        landing_zone_name=landing_zone_name,
+        landing_zone_name=f"{landing_zone_name}.{table_name}" if table_name else landing_zone_name,
         description_hint=description_hint,
         columns_hint=columns_hint,
         samples=samples_text,
@@ -129,14 +144,20 @@ async def infer_profile(
 async def upsert_profile(
     db: AsyncSession, account_id: str, landing_zone_name: str, resolved: dict
 ) -> LandingZoneDataProfile:
+    table_name = resolved.get("table_name")
     result = await db.execute(
         select(LandingZoneDataProfile).where(
             LandingZoneDataProfile.account_id == account_id,
             LandingZoneDataProfile.landing_zone_name == landing_zone_name,
+            LandingZoneDataProfile.table_name == table_name,
         )
     )
     record = result.scalar_one_or_none()
     if record:
+        record.owner = resolved.get("owner")
+        record.refresh_rate = resolved.get("refresh_rate")
+        record.data_classification = resolved.get("data_classification")
+        record.s3_prefix = resolved.get("s3_prefix")
         record.file_format = resolved["file_format"]
         record.description = resolved["description"]
         record.expected_size_bytes = resolved["expected_size_bytes"]
@@ -147,6 +168,11 @@ async def upsert_profile(
         record = LandingZoneDataProfile(
             account_id=account_id,
             landing_zone_name=landing_zone_name,
+            table_name=table_name,
+            owner=resolved.get("owner"),
+            refresh_rate=resolved.get("refresh_rate"),
+            data_classification=resolved.get("data_classification"),
+            s3_prefix=resolved.get("s3_prefix"),
             file_format=resolved["file_format"],
             description=resolved["description"],
             expected_size_bytes=resolved["expected_size_bytes"],

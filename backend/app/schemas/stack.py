@@ -1,5 +1,4 @@
 from datetime import datetime
-from typing import Literal
 from pydantic import BaseModel, Field
 
 
@@ -45,10 +44,8 @@ class CloudOut(BaseModel):
 
 class StackCreate(BaseModel):
     name: str
-    branch: str | None = None
     verify_before_pr: bool | None = None
     verify_max_attempts: int | None = Field(default=None, ge=1, le=10)
-    module_version: str | None = None
     circleci_context: str | None = None
     warehouse: WarehouseUpdate | None = None
     cloud: CloudUpdate | None = None
@@ -56,10 +53,8 @@ class StackCreate(BaseModel):
 
 class StackUpdate(BaseModel):
     name: str | None = None
-    branch: str | None = None
     verify_before_pr: bool | None = None
     verify_max_attempts: int | None = Field(default=None, ge=1, le=10)
-    module_version: str | None = None
     circleci_context: str | None = None
     warehouse: WarehouseUpdate | None = None
     cloud: CloudUpdate | None = None
@@ -68,10 +63,8 @@ class StackUpdate(BaseModel):
 class StackOut(BaseModel):
     id: str
     name: str
-    branch: str
     verify_before_pr: bool
     verify_max_attempts: int
-    module_version: str
     circleci_context: str | None
     sort_order: int
     is_default: bool
@@ -103,11 +96,6 @@ class ConnectionTestResult(BaseModel):
     message: str
 
 
-class ReleaseRequest(BaseModel):
-    target: Literal["prod", "develop"]
-    resolutions: dict[str, Literal["ours", "theirs"]] | None = None
-
-
 class TopologyNodeOut(BaseModel):
     id: str
     landing_zone: str
@@ -133,20 +121,6 @@ class TopologyOut(BaseModel):
     connected: bool
     error: str | None = None
     skipped: list[TopologySkippedOut] = []
-
-
-class ConflictOut(BaseModel):
-    path: str
-    ours: str | None
-    theirs: str | None
-
-
-class ReleaseResponse(BaseModel):
-    pr_urls: list[str] = []
-    branch: str | None = None
-    conflicts: list[ConflictOut] | None = None
-    source_branch: str | None = None
-    target_branch: str | None = None
 
 
 class AccessKeysOut(BaseModel):

@@ -21,14 +21,20 @@ Extract the current configuration and return it as a JSON object with exactly th
   data_owner           - string
   region               - string (AWS region, e.g. eu-west-1)
   existing_s3_bucket_arn - string or null (null if no existing bucket was provided)
+  existing_database_landing_zone - string or null. Look at the {name}-si file's `dependency "db"`
+    block: its config_path is "../X-db". If X equals "{name}", this is null (the landing zone owns
+    its own database). Otherwise this is X (the landing zone reuses that other landing zone's
+    database and medallion-arch schemas instead of having its own).
   s3_stage_prefix      - string
   file_format_type     - string, one of: JSON, CSV, PARQUET, AVRO, ORC, XML
   schema_names         - list of strings
   create_access_keys   - boolean (true if an IAM user with access keys was created for direct S3 access)
-  create_snowpipe      - boolean (true only if a "{name}-pipe/terragrunt.hcl" file is included below)
-  bronze_table_name    - string or null (the `target_table` input from the pipe's terragrunt.hcl; null if no pipe file was included)
-  snowpipe_filter_prefix - string (the pipe's `filter_prefix` input, or "" if absent/no pipe)
-  snowpipe_filter_suffix - string (the pipe's `filter_suffix` input, or "" if absent/no pipe)
+  create_snowpipe      - boolean (true if at least one "{name}-pipe*/terragrunt.hcl" file is included below)
+  tables                - array, one entry per "{name}-pipe*/terragrunt.hcl" file included below (empty
+    array if none are included), each an object with:
+      name          - the `target_table` input from that file
+      filter_prefix - the `filter_prefix` input from that file, or "" if absent
+      filter_suffix - the `filter_suffix` input from that file, or "" if absent
 
 HCL files:
 
@@ -55,16 +61,30 @@ class UpdateLandingZoneTool(BaseTool):
             "Update an existing landing zone. Clones the connected GitHub repo, reads the "
             "current Terragrunt config for the named landing zone, applies only the fields "
             "you specify, regenerates the configs, and opens a PR with the changes. "
-            "Only provide the fields you want to change — everything else is preserved as-is. "
-            "Pass create_snowpipe=true with bronze_table_name to add Snowpipe auto-ingest to a landing "
-            "zone that doesn't have it yet, or change bronze_table_name/snowpipe_filter_prefix/"
-            "snowpipe_filter_suffix to reconfigure an existing one. Setting create_snowpipe=false does "
-            "NOT remove an already-deployed pipe or Bronze table — use remove_terragrunt_block with "
-            "'{name}-pipe' for that instead. "
-            "By default this applies the change to every stack (e.g. dev AND prod) — always pass "
-            "stack_name when the user's request is specific to one environment (e.g. 'only in dev', "
-            "'prod should stay the same', 'just for staging'), otherwise you will silently change "
-            "every other stack too. This only ever touches this landing zone's own terragrunt.hcl "
+            "Only provide the fields you want to change — everything else is preserved as-is, including "
+            "every other table's Snowpipe setup if this landing zone has more than one (this tool only "
+            "ever edits ONE table's pipe per call, named by bronze_table_name — the rest are read back "
+            "from the repo and carried through unchanged). "
+            "Pass create_snowpipe=true with bronze_table_name to add Snowpipe auto-ingest for a table "
+            "that doesn't have it yet (a new table if the name doesn't already exist, or the landing "
+            "zone's first table if it has none), or change bronze_table_name/snowpipe_filter_prefix/"
+            "snowpipe_filter_suffix to reconfigure an existing one — bronze_table_name must exactly "
+            "match (case-insensitive) an existing table's name for this to edit it rather than add a "
+            "new one. Setting create_snowpipe=false does NOT remove an already-deployed pipe or Bronze "
+            "table — use remove_terragrunt_block with '{name}-pipe' (or '{name}-pipe-{table}' for any "
+            "table after the first) for that instead. "
+            "Whether this landing zone owns its own Snowflake database or reuses another landing "
+            "zone's (existing_database_landing_zone, set at creation) can NOT be changed here — it's "
+            "preserved automatically from whatever is currently deployed, and switching it after the "
+            "fact would mean migrating already-loaded Bronze tables to a different database/schema, "
+            "not just rewriting a dependency block. If the user wants that, tell them it isn't "
+            "supported as an update. "
+            "Always ask the user which stack(s) this change should apply to before calling — don't "
+            "assume. If they say 'all', 'every environment', or have no preference, proceed without "
+            "stack_name (applies the change to every stack, e.g. dev AND prod — this is the default "
+            "when they don't care). If they name a specific one (e.g. 'only in dev', 'just for "
+            "staging'), pass stack_name for it. Getting this wrong silently changes every other "
+            "stack too. This only ever touches this landing zone's own terragrunt.hcl "
             "config — it never changes the vendored Terraform modules (use a module version bump "
             "plus a hard-refresh for that). "
             "Requires confirmation: call once with confirm omitted (or false) to get a plain-language "
@@ -85,9 +105,18 @@ class UpdateLandingZoneTool(BaseTool):
                 },
                 "stack_name": {
                     "type": "string",
-                    "description": "Restrict this change to a single stack (e.g. 'dev'). Required whenever "
-                    "the request is scoped to one environment. Omit only when the user explicitly wants "
+                    "description": "Restrict this change to a single stack (e.g. 'dev'). Prefer "
+                    "stack_names (plural) when you have it from a UI selection; this remains for a "
+                    "plain-language single-stack request. Omit both when the user explicitly wants "
                     "the change applied to every stack on the account.",
+                },
+                "stack_names": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Restrict this change to a specific subset of stacks (e.g. ['dev', "
+                    "'staging']) — one or more, but not necessarily all. Takes precedence over "
+                    "stack_name if both are given. Omit (and omit stack_name) when the user wants "
+                    "every stack on the account, which is the default when they have no preference.",
                 },
                 "data_classification": {
                     "type": "string",
@@ -146,6 +175,7 @@ class UpdateLandingZoneTool(BaseTool):
         self,
         name: str,
         stack_name: str | None = None,
+        stack_names: list[str] | None = None,
         data_classification: str | None = None,
         retention_policy: str | None = None,
         data_owner: str | None = None,
@@ -160,48 +190,50 @@ class UpdateLandingZoneTool(BaseTool):
         snowpipe_filter_prefix: str | None = None,
         snowpipe_filter_suffix: str | None = None,
         confirm: bool = False,
-        _chat_branch: str | None = None,
     ) -> str:
         repo = await self._get_github_repo()
         if not repo:
             return "No GitHub repo connected. Use POST /api/v1/github/repos first."
 
-        if stack_name:
-            reference_stack = await self._get_stack(stack_name)
+        # Reading "current" config only needs ONE deployed stack as a reference
+        # (an unscoped/multi-stack update applies the same patch uniformly to
+        # all of them anyway) — stack_names[0] stands in for the whole subset here.
+        single_stack_name = stack_names[0] if stack_names else stack_name
+        if single_stack_name:
+            reference_stack = await self._get_stack(single_stack_name)
             if not reference_stack:
-                return f"No stack named '{stack_name}' found for this account."
+                return f"No stack named '{single_stack_name}' found for this account."
         else:
             reference_stack = await self._get_reference_stack()
             if not reference_stack:
                 return "No stacks configured for this account. Add one under Admin → Stacks first."
 
-        # Each stack's landing-zone content lives on that stack's own branch
-        # (e.g. dev -> develop, prod -> main) — not necessarily the repo's
-        # account-level default branch.
-        stack_branch = reference_stack.branch
+        # Every stack's landing-zone content lives on the same trunk branch
+        # (GitHub Flow) — only the directory (reference_stack.name) differs
+        # per stack, not the branch.
+        trunk_branch = repo.branch
 
         clone_dir = tempfile.mkdtemp(prefix="lz-update-")
         try:
-            self._clone(repo, clone_dir, stack_branch)
+            self._clone(repo, clone_dir, trunk_branch)
             current = await self._extract_config(name, clone_dir, repo.infrastructure_base_path, reference_stack.name)
         except subprocess.CalledProcessError as exc:
             shutil.rmtree(clone_dir, ignore_errors=True)
-            return f"Failed to clone {repo.repo_full_name} (branch '{stack_branch}'): {exc.stderr.decode()}"
+            return f"Failed to clone {repo.repo_full_name} (branch '{trunk_branch}'): {exc.stderr.decode()}"
         except KeyError:
             shutil.rmtree(clone_dir, ignore_errors=True)
-            open_pr_url = await self._find_likely_unmerged_pr(repo, name, stack_branch)
+            open_pr_url = await self._find_likely_unmerged_pr(repo, name, trunk_branch)
             if open_pr_url:
                 return (
-                    f"'{name}' isn't on the '{stack_branch}' branch yet — but there's an open, unmerged PR "
+                    f"'{name}' isn't on the '{trunk_branch}' branch yet — but there's an open, unmerged PR "
                     f"that looks like it created it: {open_pr_url}\n\nMerge that PR first, then ask me again."
                 )
             return (
                 f"Could not find '{name}' under {reference_stack.name}/landing-zone/ on the "
-                f"'{stack_branch}' branch (the '{reference_stack.name}' stack's branch), and no matching "
-                f"open PR was found either. Things to check:\n"
+                f"'{trunk_branch}' branch, and no matching open PR was found either. Things to check:\n"
                 f"  - Is '{name}-lz' the right landing zone name? (Also tried '{name}-si', '{name}-db-arch'.)\n"
                 f"  - Was it created for a different stack? Try again with stack_name set to that stack "
-                f"(currently checked: '{reference_stack.name}', branch '{stack_branch}').\n"
+                f"(currently checked: '{reference_stack.name}').\n"
                 f"  - Does infrastructure_base_path in GitHub settings match where it actually lives in the repo?"
             )
         except json.JSONDecodeError as exc:
@@ -223,18 +255,36 @@ class UpdateLandingZoneTool(BaseTool):
                 "schema_names": schema_names,
                 "create_access_keys": create_access_keys,
                 "create_snowpipe": create_snowpipe,
-                "bronze_table_name": bronze_table_name,
-                "snowpipe_filter_prefix": snowpipe_filter_prefix,
-                "snowpipe_filter_suffix": snowpipe_filter_suffix,
             }.items()
             if v is not None
         }
         merged = {**current, **patch}
+        merged_s3_stage_prefix = merged.get("s3_stage_prefix")
+        if merged_s3_stage_prefix is None:
+            merged_s3_stage_prefix = ""
 
-        if not patch:
-            return f"No fields were specified to change on landing zone '{name}' — nothing to do."
+        # This tool only ever exposes editing ONE table's pipe at a time
+        # (bronze_table_name/snowpipe_filter_prefix/snowpipe_filter_suffix) — but
+        # the landing zone may have several. Start from every table _extract_config
+        # found (every {name}-pipe*/terragrunt.hcl) so an unrelated field change
+        # (e.g. retention_policy) never silently drops the others, then merge this
+        # call's single-table edit into that list by name (case-insensitive, since
+        # Terraform uppercases target_table).
+        existing_tables = current.get("tables") or []
+        merged_tables = [dict(t) for t in existing_tables]
+        if bronze_table_name is not None:
+            match = next(
+                (t for t in merged_tables if t.get("name", "").upper() == bronze_table_name.upper()), None
+            )
+            if match is None:
+                match = {"name": bronze_table_name, "filter_prefix": "", "filter_suffix": ""}
+                merged_tables.append(match)
+            if snowpipe_filter_prefix is not None:
+                match["filter_prefix"] = snowpipe_filter_prefix
+            if snowpipe_filter_suffix is not None:
+                match["filter_suffix"] = snowpipe_filter_suffix
 
-        if merged.get("create_snowpipe") and not merged.get("bronze_table_name"):
+        if merged.get("create_snowpipe") and not merged_tables:
             return "create_snowpipe requires bronze_table_name (the Bronze table Snowpipe will create and load into)."
 
         if not confirm:
@@ -243,15 +293,39 @@ class UpdateLandingZoneTool(BaseTool):
                 for field, value in patch.items()
                 if current.get(field) != value
             )
+            if bronze_table_name is not None:
+                changes += (
+                    f"\n  tables: {[t.get('name') for t in existing_tables]!r} → "
+                    f"{[t.get('name') for t in merged_tables]!r}"
+                )
             if not changes:
                 return f"Landing zone '{name}' already matches the requested config — nothing to change."
+            target_desc = ", ".join(stack_names) if stack_names else (stack_name or "every stack")
             return (
-                f"This will update landing zone '{name}' on {stack_name or 'every stack'}:\n\n"
+                f"This will update landing zone '{name}' on {target_desc}:\n\n"
                 f"{changes}\n\n"
                 "This only rewrites this landing zone's own terragrunt.hcl files — it will not touch "
                 "the vendored Terraform modules or any other landing zone.\n\n"
                 "Reply to confirm and I'll open the PR."
             )
+
+        # Convert each table's absolute filter_prefix back to the s3_prefix (relative
+        # to s3_stage_prefix) LandingZoneTool.execute() expects — it reconstructs the
+        # absolute prefix itself as s3_stage_prefix + s3_prefix. No sample_files here:
+        # an update never re-infers or overwrites an already-captured data profile.
+        tables_arg = []
+        for t in merged_tables:
+            filter_prefix = t.get("filter_prefix") or ""
+            s3_prefix = (
+                filter_prefix[len(merged_s3_stage_prefix):]
+                if filter_prefix.startswith(merged_s3_stage_prefix)
+                else filter_prefix
+            )
+            tables_arg.append({
+                "name": t["name"],
+                "s3_prefix": s3_prefix,
+                "filter_suffix": t.get("filter_suffix") or "",
+            })
 
         # Import here to avoid circular imports
         from app.tools.terraform.s3 import LandingZoneTool
@@ -263,17 +337,23 @@ class UpdateLandingZoneTool(BaseTool):
             data_owner=merged.get("data_owner", "unknown"),
             region=merged.get("region", "eu-west-1"),
             existing_s3_bucket_arn=merged.get("existing_s3_bucket_arn") or "",
-            s3_stage_prefix=merged.get("s3_stage_prefix", "data/"),
+            # Not settable via this tool's input_schema — deliberately not exposed
+            # as a patchable field, since changing which database a landing zone
+            # attaches to after creation would mean migrating already-loaded
+            # Bronze tables between schemas, not just rewriting a dependency
+            # block. Always carried through unchanged from `current` (extracted
+            # from the deployed {name}-si) so an unrelated field change (e.g.
+            # retention_policy) can never silently repoint -si/pipes at a
+            # {name}-db that was never created.
+            existing_database_landing_zone=merged.get("existing_database_landing_zone") or "",
+            s3_stage_prefix=merged_s3_stage_prefix,
             file_format_type=merged.get("file_format_type", "JSON"),
             schema_names=merged.get("schema_names", ["bronze", "silver", "gold", "platinum"]),
             create_access_keys=merged.get("create_access_keys", False),
             create_snowpipe=merged.get("create_snowpipe", False),
-            bronze_table_name=merged.get("bronze_table_name") or "",
-            snowpipe_filter_prefix=merged.get("snowpipe_filter_prefix") or "",
-            snowpipe_filter_suffix=merged.get("snowpipe_filter_suffix") or "",
+            tables=tables_arg,
             _action="update",
-            _target_stack_names=[stack_name] if stack_name else None,
-            _chat_branch=_chat_branch,
+            _target_stack_names=stack_names if stack_names else ([stack_name] if stack_name else None),
         )
 
     # ------------------------------------------------------------------
@@ -295,10 +375,22 @@ class UpdateLandingZoneTool(BaseTool):
         # account's lowest-sort-order stack as a representative default (a plain,
         # unscoped update applies uniformly to every stack anyway). The clone was
         # already checked out to that stack's own branch, so this is just a path.
-        for component in (f"{name}-lz", f"{name}-si", f"{name}-db-arch", f"{name}-pipe"):
+        for component in (f"{name}-lz", f"{name}-si", f"{name}-db-arch"):
             hcl = base / reference_stack / "landing-zone" / component / "terragrunt.hcl"
             if hcl.exists():
                 files[f"{reference_stack}/landing-zone/{component}/terragrunt.hcl"] = hcl.read_text()
+
+        # Every table's pipe component, not just the first: {name}-pipe (the first
+        # table) plus any {name}-pipe-<table> (every table after that) — see
+        # LandingZoneTool._pipe_components. Missing any of these here would mean an
+        # unrelated field update (e.g. changing retention_policy) silently drops
+        # every table but the first from the regenerated config.
+        landing_zone_dir = base / reference_stack / "landing-zone"
+        if landing_zone_dir.exists():
+            for pipe_dir in sorted(landing_zone_dir.glob(f"{name}-pipe*")):
+                hcl = pipe_dir / "terragrunt.hcl"
+                if hcl.exists():
+                    files[f"{reference_stack}/landing-zone/{pipe_dir.name}/terragrunt.hcl"] = hcl.read_text()
 
         for fname in ("region.hcl",):
             f = base / reference_stack / fname

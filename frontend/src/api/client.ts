@@ -73,10 +73,8 @@ export type CloudUpdate = Partial<CloudOut>
 export interface StackOut {
   id: string
   name: string
-  branch: string
   verify_before_pr: boolean
   verify_max_attempts: number
-  module_version: string
   sort_order: number
   is_default: boolean
   warehouse: WarehouseOut
@@ -87,20 +85,16 @@ export interface StackOut {
 
 export interface StackCreate {
   name: string
-  branch?: string
   verify_before_pr?: boolean
   verify_max_attempts?: number
-  module_version?: string
   warehouse?: WarehouseUpdate
   cloud?: CloudUpdate
 }
 
 export interface StackUpdate {
   name?: string
-  branch?: string
   verify_before_pr?: boolean
   verify_max_attempts?: number
-  module_version?: string
   warehouse?: WarehouseUpdate
   cloud?: CloudUpdate
 }
@@ -121,20 +115,6 @@ export interface ModuleRefreshResult {
   files_removed: number
   files_added: number
   message: string | null
-}
-
-export interface ReleaseConflict {
-  path: string
-  ours: string | null
-  theirs: string | null
-}
-
-export interface ReleaseResult {
-  pr_urls: string[]
-  branch: string | null
-  conflicts?: ReleaseConflict[] | null
-  source_branch?: string | null
-  target_branch?: string | null
 }
 
 export type TopologyNodeType =
@@ -182,7 +162,30 @@ export interface ProjectOut {
   version_control_created: boolean
   cicd_created: boolean
   infrastructure_bootstrapped: boolean
+  default_retention_policy: string | null
   created_at: string
+}
+
+export interface DataClassificationOut {
+  id: string
+  name: string
+  description: string | null
+  is_default: boolean
+  sort_order: number
+  created_at: string
+  updated_at: string
+}
+
+export interface DataClassificationCreate {
+  name: string
+  description?: string | null
+  is_default?: boolean
+}
+
+export interface DataClassificationUpdate {
+  name?: string
+  description?: string | null
+  is_default?: boolean
 }
 
 export interface GitHubRepoOut {
@@ -190,6 +193,7 @@ export interface GitHubRepoOut {
   project_name: string
   repo_full_name: string
   branch: string
+  module_version: string
   api_url: string
   infrastructure_base_path: string
   auto_merge: boolean
@@ -203,6 +207,7 @@ export interface GitHubRepoOut {
 export interface GitHubRepoConnect {
   repo_full_name: string
   branch: string
+  module_version?: string
   token?: string
   api_url: string
   infrastructure_base_path: string
@@ -504,21 +509,12 @@ export const api = {
 
   listModuleVersions(): Promise<ModuleVersion[]> {
     if (config.mockApi) return mockApi.listModuleVersions()
-    return request('/stacks/module-versions')
+    return request('/github/repos/module-versions')
   },
 
-  refreshStackModules(id: string): Promise<ModuleRefreshResult> {
-    if (config.mockApi) return mockApi.refreshStackModules(id)
-    return request(`/stacks/${id}/refresh-modules`, { method: 'POST' })
-  },
-
-  releaseStack(
-    id: string,
-    target: 'prod' | 'develop',
-    resolutions?: Record<string, 'ours' | 'theirs'>
-  ): Promise<ReleaseResult> {
-    if (config.mockApi) return mockApi.releaseStack(id, target, resolutions)
-    return request(`/stacks/${id}/release`, { method: 'POST', body: JSON.stringify({ target, resolutions }) })
+  refreshRepoModules(): Promise<ModuleRefreshResult> {
+    if (config.mockApi) return mockApi.refreshRepoModules()
+    return request('/github/repos/refresh-modules', { method: 'POST' })
   },
 
   getStackTopology(id: string, refresh = false): Promise<Topology> {
@@ -534,6 +530,31 @@ export const api = {
   listProjects(): Promise<ProjectOut[]> {
     if (config.mockApi) return mockApi.listProjects()
     return request('/projects')
+  },
+
+  updateProjectSettings(data: { default_retention_policy: string | null }): Promise<ProjectOut> {
+    if (config.mockApi) return mockApi.updateProjectSettings(data)
+    return request('/projects/current/settings', { method: 'PUT', body: JSON.stringify(data) })
+  },
+
+  listDataClassifications(): Promise<DataClassificationOut[]> {
+    if (config.mockApi) return mockApi.listDataClassifications()
+    return request('/data-classifications')
+  },
+
+  createDataClassification(data: DataClassificationCreate): Promise<DataClassificationOut> {
+    if (config.mockApi) return mockApi.createDataClassification(data)
+    return request('/data-classifications', { method: 'POST', body: JSON.stringify(data) })
+  },
+
+  updateDataClassification(id: string, data: DataClassificationUpdate): Promise<DataClassificationOut> {
+    if (config.mockApi) return mockApi.updateDataClassification(id, data)
+    return request(`/data-classifications/${id}`, { method: 'PUT', body: JSON.stringify(data) })
+  },
+
+  deleteDataClassification(id: string): Promise<void> {
+    if (config.mockApi) return mockApi.deleteDataClassification(id)
+    return request(`/data-classifications/${id}`, { method: 'DELETE' })
   },
 
   connectRepo(data: GitHubRepoConnect): Promise<GitHubRepoOut> {

@@ -161,18 +161,18 @@ async def get_stack_topology(
         _cache[cache_key] = (time.time(), topology)
         return topology
 
-    svc = GitHubService(token=repo.token, repo_full_name=repo.repo_full_name, branch=stack.branch, api_url=repo.api_url)
+    svc = GitHubService(token=repo.token, repo_full_name=repo.repo_full_name, branch=repo.branch, api_url=repo.api_url)
     base = f"{repo.infrastructure_base_path}/{stack.name}/landing-zone" if repo.infrastructure_base_path else f"{stack.name}/landing-zone"
 
     try:
-        entries = await svc.list_directory(base, ref=stack.branch)
+        entries = await svc.list_directory(base, ref=repo.branch)
         dirs = [e["name"] for e in entries if e.get("type") == "dir"]
 
         nodes: list[TopologyNode] = []
         edges: list[TopologyEdge] = []
         skipped: list[SkippedEntry] = []
         for component_dir in dirs:
-            content = await svc.get_file_content(f"{base}/{component_dir}/terragrunt.hcl", ref=stack.branch)
+            content = await svc.get_file_content(f"{base}/{component_dir}/terragrunt.hcl", ref=repo.branch)
             if not content:
                 skipped.append(SkippedEntry(dir=component_dir, reason="no terragrunt.hcl found in this directory"))
                 continue

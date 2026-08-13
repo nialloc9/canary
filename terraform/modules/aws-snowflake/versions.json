@@ -8,5 +8,10 @@
     "version": "1.0.1",
     "released_at": "2026-07-08",
     "notes": "Restructured module source layout to terraform/modules/<stack>/<version>/ so each module stack (e.g. aws-snowflake) can be versioned independently. No functional changes to the modules themselves — identical to 1.0.0 plus the Snowpipe module added earlier."
+  },
+  {
+    "version": "1.0.2",
+    "released_at": "2026-08-10",
+    "notes": "Snowpipe pipe name now includes the target table, not just the landing zone name (aws/snowflake-pipe) — required for landing zones with more than one table/pipe, since the old name collided across tables. Existing landing zones on 1.0.1 or earlier will have their pipe destroyed and recreated (Bronze table and data are unaffected) the next time they're hard-refreshed to this version and applied."
   }
 ]

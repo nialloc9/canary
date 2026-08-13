@@ -3,7 +3,7 @@ from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 
 from app.tools.base import BaseTool
 import app.tools.dbt.templates as templates
@@ -82,25 +82,40 @@ class CreateDbtStagingModelTool(BaseTool):
         bronze_schema: str,
         bronze_table_name: str,
         model_name: str | None = None,
-        _chat_branch: str | None = None,
     ) -> str:
         repo_result = await self._db.execute(select(DbtRepo).where(DbtRepo.account_id == self._account_id))
         repo = repo_result.scalar_one_or_none()
         if not repo:
             return "No dbt repo connected for this account. Use POST /api/v1/dbt/repo first."
 
+        # A landing zone created with multiple tables (see create_landing_zone's `tables`
+        # list) has one profile row per table_name — match this call's bronze_table_name
+        # to the right one. Landing zones created before per-table profiles existed have
+        # a single row with a null table_name describing their one (implicit) table —
+        # fall back to that if there's no exact match.
         profile_result = await self._db.execute(
             select(LandingZoneDataProfile).where(
                 LandingZoneDataProfile.account_id == self._account_id,
                 LandingZoneDataProfile.landing_zone_name == landing_zone_name,
+                func.upper(LandingZoneDataProfile.table_name) == bronze_table_name.upper(),
             )
         )
         profile = profile_result.scalar_one_or_none()
+        if not profile:
+            legacy_result = await self._db.execute(
+                select(LandingZoneDataProfile).where(
+                    LandingZoneDataProfile.account_id == self._account_id,
+                    LandingZoneDataProfile.landing_zone_name == landing_zone_name,
+                    LandingZoneDataProfile.table_name.is_(None),
+                )
+            )
+            profile = legacy_result.scalar_one_or_none()
         if not profile or not profile.columns:
             return (
-                f"No data profile found for landing zone '{landing_zone_name}' — create_landing_zone "
-                "collects this automatically from sample files when the landing zone is first set up. "
-                "Run that first (or re-run it with sample_files if this landing zone predates that step)."
+                f"No data profile found for landing zone '{landing_zone_name}' table '{bronze_table_name}' "
+                "— create_landing_zone collects this automatically from each table's sample files when "
+                "the landing zone is first set up. Run that first (or re-run it with sample_files for "
+                "this table if it predates per-table profiles)."
             )
 
         model_name = templates.sanitize_identifier(model_name or f"stg_{landing_zone_name}")

@@ -8,10 +8,15 @@ class ProjectOut(BaseModel):
     version_control_created: bool
     cicd_created: bool
     infrastructure_bootstrapped: bool
+    default_retention_policy: str | None
     created_at: datetime
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class ProjectSettingsUpdate(BaseModel):
+    default_retention_policy: str | None = None
 
 
 class ProjectCiCdResponse(BaseModel):

@@ -1,16 +1,89 @@
 import { useState, useEffect, useRef, FormEvent, KeyboardEvent } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { api, ChatResponse, ConversationOut, StackOut, ReleaseResult, ReleaseConflict, ProjectOut } from '../api/client'
+import { api, ChatResponse, ConversationOut, StackOut, ProjectOut, DataClassificationOut } from '../api/client'
 import { AppLayout } from '../components/AppLayout'
 import { Button } from '../components/ui/button'
 import { Textarea } from '../components/ui/textarea'
 import { ScrollArea } from '../components/ui/scroll-area'
 import { TopologyDiagram } from '../components/TopologyDiagram'
 import { Markdown } from '../components/Markdown'
+import { TableDraftForm, DraftTable } from '../components/TableDraftForm'
+import { FieldRow, NativeSelect } from '../components/admin/shared'
+
+const NEW_DATABASE = ''
+
+/** Tools that gate on a confirm=true second call — a first call without confirm
+ * is just a preview, and pairs with a Stacks picker + Confirm button so the user
+ * can pick which stack(s) it targets before it actually runs. */
+const CONFIRM_GATED_TOOLS = ['update_landing_zone', 'create_snowflake_pipe']
+
+interface PendingConfirm {
+  tool: string
+  input: Record<string, unknown>
+}
 
 interface Message {
   role: 'user' | 'assistant'
   content: string
+  draftTables?: DraftTable[]
+  draftConfirmed?: boolean
+  pendingConfirm?: PendingConfirm
+  confirmHandled?: boolean
+}
+
+/** Pulls a draft_landing_zone_tables tool call's result (JSON: {tables: [...]}) out
+ * of a chat response, if one was made — the form gets rendered from this, in place
+ * of asking the user the one-table-at-a-time questions in plain text. */
+function extractDraftTables(toolCalls: ChatResponse['tool_calls']): DraftTable[] | undefined {
+  const call = toolCalls?.find(c => c.tool === 'draft_landing_zone_tables')
+  if (!call) return undefined
+  try {
+    const parsed = JSON.parse(call.result)
+    return Array.isArray(parsed.tables) ? parsed.tables : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Pulls out a confirm-gated tool's preview call (confirm omitted/false) so a
+ * Stacks picker + Confirm button can be rendered under it — replaying the same
+ * call with confirm: true is what actually executes it. */
+function extractPendingConfirm(toolCalls: ChatResponse['tool_calls']): PendingConfirm | undefined {
+  const call = toolCalls?.find(c => CONFIRM_GATED_TOOLS.includes(c.tool) && c.input?.confirm !== true)
+  return call ? { tool: call.tool, input: call.input } : undefined
+}
+
+function StackSelector({ stacks, selected, onChange, disabled = false }: {
+  stacks: StackOut[]
+  selected: string[]
+  onChange: (names: string[]) => void
+  disabled?: boolean
+}) {
+  const allSelected = selected.length === 0
+  function toggleStack(stackName: string) {
+    onChange(selected.includes(stackName) ? selected.filter(s => s !== stackName) : [...selected, stackName])
+  }
+  return (
+    <FieldRow label="Stacks" hint="Which stack(s) this applies to. Leaving none checked means every stack (the default).">
+      <div className="space-y-1">
+        <label className="flex items-center gap-2 text-sm">
+          <input type="checkbox" checked={allSelected} disabled={disabled} onChange={() => onChange([])} />
+          All stacks
+        </label>
+        {stacks.map(s => (
+          <label key={s.id} className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={selected.includes(s.name)}
+              disabled={disabled}
+              onChange={() => toggleStack(s.name)}
+            />
+            {s.name}
+          </label>
+        ))}
+      </div>
+    </FieldRow>
+  )
 }
 
 function CanaryLogo({ size = 20 }: { size?: number }) {
@@ -37,17 +110,12 @@ export function ChatPage() {
   const [sending, setSending] = useState(false)
   const [stacks, setStacks] = useState<StackOut[]>([])
   const [selectedStackId, setSelectedStackId] = useState<string | undefined>()
-  const [releaseStep, setReleaseStep] = useState<'idle' | 'confirm-dev' | 'choose-target'>('idle')
-  const [releaseChoice, setReleaseChoice] = useState<'prod' | 'develop'>('prod')
-  const [releasing, setReleasing] = useState(false)
-  const [releaseResult, setReleaseResult] = useState<ReleaseResult | null>(null)
-  const [releaseError, setReleaseError] = useState('')
-  const [releaseTarget, setReleaseTarget] = useState<'prod' | 'develop'>('prod')
-  const [conflicts, setConflicts] = useState<ReleaseConflict[] | null>(null)
-  const [conflictChoices, setConflictChoices] = useState<Record<string, 'ours' | 'theirs'>>({})
-  const [resolving, setResolving] = useState(false)
-  const [showTopology, setShowTopology] = useState(false)
+  const [stackPickerOpen, setStackPickerOpen] = useState(false)
   const [projects, setProjects] = useState<ProjectOut[]>([])
+  const [classifications, setClassifications] = useState<DataClassificationOut[]>([])
+  const [existingLandingZones, setExistingLandingZones] = useState<string[]>([])
+  const [dbChoices, setDbChoices] = useState<Record<number, string>>({})
+  const [stackChoices, setStackChoices] = useState<Record<number, string[]>>({})
   const [editingConvId, setEditingConvId] = useState<string | undefined>()
   const [editingTitle, setEditingTitle] = useState('')
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -55,20 +123,19 @@ export function ChatPage() {
 
   useEffect(() => {
     api.getConversations().then(setConversations).catch(() => {})
-    api.listStacks().then(list => {
-      setStacks(list)
-      setSelectedStackId(prev => prev ?? (list.find(s => s.is_default) ?? list[0])?.id)
-    }).catch(() => {})
+    api.listStacks().then(setStacks).catch(() => {})
     api.listProjects().then(setProjects).catch(() => {})
+    api.listDataClassifications().then(setClassifications).catch(() => {})
   }, [])
 
   useEffect(() => {
-    setReleaseStep('idle')
-    setReleaseResult(null)
-    setReleaseError('')
-    setConflicts(null)
-    setConflictChoices({})
-    setShowTopology(false)
+    if (!selectedStackId) {
+      setExistingLandingZones([])
+      return
+    }
+    api.getStackTopology(selectedStackId)
+      .then(t => setExistingLandingZones(Array.from(new Set(t.nodes.map(n => n.landing_zone))).sort()))
+      .catch(() => setExistingLandingZones([]))
   }, [selectedStackId])
 
   const selectedStack = stacks.find(s => s.id === selectedStackId)
@@ -85,48 +152,6 @@ export function ChatPage() {
     if (!selectedStack.warehouse.account_name || !selectedStack.warehouse.user || !selectedStack.warehouse.private_key_b64) {
       missingConfig.push({ label: 'a warehouse', href: '/admin?tab=stacks' })
     }
-  }
-
-  async function doRelease(target: 'prod' | 'develop') {
-    if (!selectedStackId) return
-    setReleaseStep('idle')
-    setReleasing(true)
-    setReleaseError('')
-    setReleaseResult(null)
-    setConflicts(null)
-    setReleaseTarget(target)
-    try {
-      const result = await api.releaseStack(selectedStackId, target)
-      if (result.conflicts && result.conflicts.length > 0) {
-        setConflicts(result.conflicts)
-        setConflictChoices(Object.fromEntries(result.conflicts.map(c => [c.path, 'ours' as const])))
-      } else {
-        setReleaseResult(result)
-      }
-    } catch (e) {
-      setReleaseError(e instanceof Error ? e.message : 'Release failed')
-    }
-    setReleasing(false)
-  }
-
-  async function resolveConflicts() {
-    if (!selectedStackId || !conflicts) return
-    setResolving(true)
-    setReleaseError('')
-    try {
-      const result = await api.releaseStack(selectedStackId, releaseTarget, conflictChoices)
-      if (result.conflicts && result.conflicts.length > 0) {
-        // Resolutions were incomplete or something changed upstream — show the fresh set.
-        setConflicts(result.conflicts)
-        setConflictChoices(Object.fromEntries(result.conflicts.map(c => [c.path, 'ours' as const])))
-      } else {
-        setConflicts(null)
-        setReleaseResult(result)
-      }
-    } catch (e) {
-      setReleaseError(e instanceof Error ? e.message : 'Failed to resolve conflicts')
-    }
-    setResolving(false)
   }
 
   useEffect(() => {
@@ -184,7 +209,7 @@ export function ChatPage() {
   }
 
   function startNewConversation() {
-    setSelectedStackId((stacks.find(s => s.is_default) ?? stacks[0])?.id)
+    setSelectedStackId(undefined)
     navigate('/')
   }
 
@@ -204,15 +229,21 @@ export function ChatPage() {
     } catch {}
   }
 
-  async function send() {
-    const text = input.trim()
+  async function sendMessage(text: string) {
     if (!text || sending) return
-    setInput('')
     setMessages(m => [...m, { role: 'user', content: text }])
     setSending(true)
     try {
       const res: ChatResponse = await api.chat(text, activeConvId, selectedStackId)
-      setMessages(m => [...m, { role: 'assistant', content: res.reply }])
+      setMessages(m => [
+        ...m,
+        {
+          role: 'assistant',
+          content: res.reply,
+          draftTables: extractDraftTables(res.tool_calls),
+          pendingConfirm: extractPendingConfirm(res.tool_calls),
+        },
+      ])
       setLoadedConvId(res.conversation_id)
       if (!activeConvId) {
         navigate(`/chat/${res.conversation_id}`, { replace: true })
@@ -229,6 +260,53 @@ export function ChatPage() {
     } finally {
       setSending(false)
     }
+  }
+
+  function send() {
+    const text = input.trim()
+    if (!text || sending) return
+    setInput('')
+    sendMessage(text)
+  }
+
+  function confirmDraftTables(messageIndex: number, tables: DraftTable[]) {
+    setMessages(m => m.map((msg, i) => (i === messageIndex ? { ...msg, draftConfirmed: true } : msg)))
+    const dbChoice = dbChoices[messageIndex] ?? NEW_DATABASE
+    const databaseInstruction =
+      dbChoice === NEW_DATABASE
+        ? 'Create a brand-new Snowflake database for this landing zone (do not set existing_database_landing_zone).'
+        : `Add this landing zone's table(s) to the existing "${dbChoice}" landing zone's database — pass ` +
+          `existing_database_landing_zone: "${dbChoice}" (do not create a new database or medallion-arch schemas).`
+    const selectedStacks = stackChoices[messageIndex] ?? []
+    const stackInstruction =
+      selectedStacks.length === 0
+        ? 'Create this on every stack configured on the account (do not pass stack_name or stack_names).'
+        : `Restrict this to these stack(s) only — pass stack_names: ${JSON.stringify(selectedStacks)}.`
+    const text =
+      "I've reviewed and confirmed these tables — call create_landing_zone with this exact " +
+      "`tables` array (ask me for anything else you still need, like the landing zone name, " +
+      'data_classification, retention_policy, or data_owner, if I haven\'t already given them). ' +
+      `${databaseInstruction} ${stackInstruction}\n\n` +
+      '```json\n' + JSON.stringify({ tables }, null, 2) + '\n```'
+    sendMessage(text)
+  }
+
+  function confirmPendingAction(messageIndex: number) {
+    const pending = messages[messageIndex]?.pendingConfirm
+    if (!pending) return
+    setMessages(m => m.map((msg, i) => (i === messageIndex ? { ...msg, confirmHandled: true } : msg)))
+    const selectedStacks = stackChoices[messageIndex] ?? []
+    const args: Record<string, unknown> = { ...pending.input, confirm: true }
+    delete args.stack_name
+    if (selectedStacks.length > 0) {
+      args.stack_names = selectedStacks
+    } else {
+      delete args.stack_names
+    }
+    const text =
+      `I confirm — call ${pending.tool} again with confirm: true and these exact arguments:\n\n` +
+      '```json\n' + JSON.stringify(args, null, 2) + '\n```'
+    sendMessage(text)
   }
 
   function handleKeyDown(e: KeyboardEvent<HTMLTextAreaElement>) {
@@ -376,6 +454,59 @@ export function ChatPage() {
                     {msg.role === 'assistant' ? 'Canary' : 'You'}
                   </p>
                   <Markdown content={msg.content} />
+                  {msg.draftTables && (
+                    <>
+                      <div className="mt-3 max-w-xs space-y-3">
+                        <FieldRow
+                          label="Database"
+                          id={`db-choice-${i}`}
+                          hint="Reusing an existing landing zone's database skips creating a new one and its medallion schemas."
+                        >
+                          <NativeSelect
+                            id={`db-choice-${i}`}
+                            value={dbChoices[i] ?? NEW_DATABASE}
+                            onChange={v => setDbChoices(c => ({ ...c, [i]: v }))}
+                          >
+                            <option value={NEW_DATABASE}>Create a new database</option>
+                            {existingLandingZones.map(lz => (
+                              <option key={lz} value={lz}>Add to existing: {lz}</option>
+                            ))}
+                          </NativeSelect>
+                        </FieldRow>
+                        <StackSelector
+                          stacks={stacks}
+                          selected={stackChoices[i] ?? []}
+                          onChange={names => setStackChoices(c => ({ ...c, [i]: names }))}
+                          disabled={msg.draftConfirmed || sending}
+                        />
+                      </div>
+                      <TableDraftForm
+                        tables={msg.draftTables}
+                        classifications={classifications}
+                        disabled={msg.draftConfirmed || sending}
+                        onConfirm={t => confirmDraftTables(i, t)}
+                      />
+                    </>
+                  )}
+                  {msg.pendingConfirm && (
+                    <div className="mt-3 max-w-xs space-y-3">
+                      <StackSelector
+                        stacks={stacks}
+                        selected={stackChoices[i] ?? []}
+                        onChange={names => setStackChoices(c => ({ ...c, [i]: names }))}
+                        disabled={msg.confirmHandled || sending}
+                      />
+                      <Button
+                        type="button"
+                        size="sm"
+                        disabled={msg.confirmHandled || sending}
+                        onClick={() => confirmPendingAction(i)}
+                        className="shadow-md shadow-primary/20"
+                      >
+                        {msg.confirmHandled ? 'Confirmed' : 'Confirm'}
+                      </Button>
+                    </div>
+                  )}
                 </div>
               </div>
             ))}
@@ -407,49 +538,52 @@ export function ChatPage() {
 
       <div className="border-t border-border/50 bg-background/80 backdrop-blur-sm px-4 pt-3 pb-4">
         {stacks.length > 0 && (
-          <div className="max-w-2xl mx-auto mb-2 flex items-center gap-1.5">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" className="text-muted-foreground/50 shrink-0">
-              <path d="M12 2v20M12 2l-3 3M12 2l3 3M12 22l-3-3M12 22l3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-              <path d="M2 12h20M2 12l3-3M2 12l3 3M22 12l-3-3M22 12l-3 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-            </svg>
-            <select
-              value={selectedStackId ?? ''}
-              onChange={e => setSelectedStackId(e.target.value || undefined)}
-              aria-label="Stack this conversation is about"
-              className="bg-transparent text-xs text-muted-foreground border border-border/50 rounded-md px-2 py-1 outline-none focus:border-primary/50 focus:text-foreground cursor-pointer"
-            >
-              <option value="">No stack selected</option>
-              {stacks.map(s => (
-                <option key={s.id} value={s.id}>
-                  {s.name}{s.is_default ? ' (default)' : ''}
-                </option>
-              ))}
-            </select>
-
-            {selectedStack && selectedStack.name !== 'prod' && releaseStep === 'idle' && (
+          <div className="max-w-2xl mx-auto mb-2">
+            <div className="relative inline-block">
               <button
                 type="button"
-                onClick={() => setReleaseStep(selectedStack.name === 'dev' ? 'confirm-dev' : 'choose-target')}
-                disabled={releasing}
-                className="text-xs text-muted-foreground border border-border/50 rounded-md px-2 py-1 hover:text-foreground hover:border-primary/50 transition-colors"
-              >
-                Release
-              </button>
-            )}
-
-            {selectedStack && (
-              <button
-                type="button"
-                onClick={() => setShowTopology(v => !v)}
-                className={`text-xs border rounded-md px-2 py-1 transition-colors ${
-                  showTopology
+                onClick={() => setStackPickerOpen(v => !v)}
+                className={`flex items-center gap-1.5 text-xs border rounded-md px-2 py-1 transition-colors ${
+                  selectedStack
                     ? 'text-foreground border-primary/50 bg-primary/10'
                     : 'text-muted-foreground border-border/50 hover:text-foreground hover:border-primary/50'
                 }`}
               >
-                {showTopology ? 'Hide infrastructure' : 'View infrastructure'}
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" className="shrink-0">
+                  <path d="M12 2v20M12 2l-3 3M12 2l3 3M12 22l-3-3M12 22l3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                  <path d="M2 12h20M2 12l3-3M2 12l3 3M22 12l-3-3M22 12l-3 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                </svg>
+                {selectedStack ? `${selectedStack.name} infrastructure` : 'View stack'}
               </button>
-            )}
+
+              {stackPickerOpen && (
+                <>
+                  <div className="fixed inset-0 z-10" onClick={() => setStackPickerOpen(false)} />
+                  <div className="absolute bottom-full left-0 mb-1.5 z-20 rounded-lg border border-border/60 bg-popover shadow-lg p-3 w-56 space-y-1.5">
+                    <label htmlFor="stack-picker-select" className="block text-[10px] font-medium text-muted-foreground uppercase tracking-wide">
+                      Which stack?
+                    </label>
+                    <select
+                      id="stack-picker-select"
+                      autoFocus
+                      value={selectedStackId ?? ''}
+                      onChange={e => {
+                        setSelectedStackId(e.target.value || undefined)
+                        setStackPickerOpen(false)
+                      }}
+                      className="w-full bg-input/50 text-sm text-foreground border border-border/60 rounded-md px-2 py-1.5 outline-none focus:border-primary/50 cursor-pointer"
+                    >
+                      <option value="">No stack selected</option>
+                      {stacks.map(s => (
+                        <option key={s.id} value={s.id}>
+                          {s.name}{s.is_default ? ' (default)' : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </>
+              )}
+            </div>
           </div>
         )}
 
@@ -472,172 +606,10 @@ export function ChatPage() {
           </div>
         )}
 
-        {selectedStack && showTopology && (
+        {selectedStack && (
           <div className="max-w-2xl mx-auto mb-2 rounded-lg border border-border/50 bg-muted/10 p-3.5">
             <TopologyDiagram stackId={selectedStack.id} bare />
           </div>
-        )}
-
-        {selectedStack && releaseStep !== 'idle' && (
-          <div className="max-w-2xl mx-auto mb-2 rounded-lg border border-border/50 bg-muted/10 p-3.5 space-y-3">
-            {releaseStep === 'confirm-dev' && (
-              <>
-                <p className="text-sm">Release dev to prod?</p>
-                <p className="text-xs text-muted-foreground">
-                  Opens a PR from a new branch based on <code className="font-mono">main</code> (merging
-                  in <code className="font-mono">develop</code>'s changes) into <code className="font-mono">main</code>,
-                  plus a companion PR into <code className="font-mono">develop</code> to keep it in sync.
-                </p>
-                <div className="flex gap-2">
-                  <Button size="sm" onClick={() => doRelease('prod')} className="shadow-md shadow-primary/20">
-                    Release to prod
-                  </Button>
-                  <Button size="sm" variant="outline" onClick={() => setReleaseStep('idle')} className="border-border/60">
-                    Cancel
-                  </Button>
-                </div>
-              </>
-            )}
-
-            {releaseStep === 'choose-target' && (
-              <>
-                <p className="text-sm">Release {selectedStack.name} to:</p>
-                <div className="flex gap-4 text-sm">
-                  <label className="flex items-center gap-1.5 cursor-pointer">
-                    <input
-                      type="radio"
-                      name="release-target"
-                      checked={releaseChoice === 'develop'}
-                      onChange={() => setReleaseChoice('develop')}
-                    />
-                    develop
-                  </label>
-                  <label className="flex items-center gap-1.5 cursor-pointer">
-                    <input
-                      type="radio"
-                      name="release-target"
-                      checked={releaseChoice === 'prod'}
-                      onChange={() => setReleaseChoice('prod')}
-                    />
-                    main
-                  </label>
-                </div>
-                {releaseChoice === 'prod' && (
-                  <p className="text-xs text-muted-foreground">
-                    Releasing to main also opens a companion PR into develop to keep it in sync.
-                  </p>
-                )}
-                <div className="flex gap-2">
-                  <Button size="sm" onClick={() => doRelease(releaseChoice)} className="shadow-md shadow-primary/20">
-                    Confirm
-                  </Button>
-                  <Button size="sm" variant="outline" onClick={() => setReleaseStep('idle')} className="border-border/60">
-                    Cancel
-                  </Button>
-                </div>
-              </>
-            )}
-          </div>
-        )}
-
-        {releasing && (
-          <p className="max-w-2xl mx-auto mb-2 text-xs text-muted-foreground">Releasing…</p>
-        )}
-
-        {conflicts && conflicts.length > 0 && (
-          <div className="max-w-2xl mx-auto mb-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3.5 space-y-3">
-            <div>
-              <p className="text-sm font-medium text-amber-700 dark:text-amber-400">
-                {conflicts.length === 1 ? '1 file needs' : `${conflicts.length} files need`} manual resolution
-              </p>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                These couldn't be auto-merged (e.g. one side deleted a file the other modified). Pick which
-                version should win for each, then confirm.
-              </p>
-            </div>
-
-            <div className="max-h-[45vh] overflow-y-auto space-y-2 pr-1 -mr-1">
-              {conflicts.map(c => (
-                <div key={c.path} className="rounded-md border border-border/50 bg-background/60 p-2.5 space-y-2">
-                  <p className="text-xs font-mono font-medium">{c.path}</p>
-                  <div className="grid grid-cols-2 gap-2 text-[11px]">
-                    <label className={`flex flex-col gap-1 rounded border p-2 cursor-pointer transition-colors ${
-                      conflictChoices[c.path] === 'ours' ? 'border-primary/60 bg-primary/8' : 'border-border/40 hover:bg-muted/30'
-                    }`}>
-                      <span className="flex items-center gap-1.5 font-medium">
-                        <input
-                          type="radio"
-                          name={`conflict-${c.path}`}
-                          checked={conflictChoices[c.path] === 'ours'}
-                          onChange={() => setConflictChoices(cc => ({ ...cc, [c.path]: 'ours' }))}
-                        />
-                        Keep prod's version
-                      </span>
-                      <pre className="whitespace-pre-wrap break-all text-muted-foreground max-h-32 overflow-y-auto">
-                        {c.ours ?? '(prod deleted this file)'}
-                      </pre>
-                    </label>
-                    <label className={`flex flex-col gap-1 rounded border p-2 cursor-pointer transition-colors ${
-                      conflictChoices[c.path] === 'theirs' ? 'border-primary/60 bg-primary/8' : 'border-border/40 hover:bg-muted/30'
-                    }`}>
-                      <span className="flex items-center gap-1.5 font-medium">
-                        <input
-                          type="radio"
-                          name={`conflict-${c.path}`}
-                          checked={conflictChoices[c.path] === 'theirs'}
-                          onChange={() => setConflictChoices(cc => ({ ...cc, [c.path]: 'theirs' }))}
-                        />
-                        Keep {selectedStack?.name ?? 'source'}'s version
-                      </span>
-                      <pre className="whitespace-pre-wrap break-all text-muted-foreground max-h-32 overflow-y-auto">
-                        {c.theirs ?? `(${selectedStack?.name ?? 'source'} deleted this file)`}
-                      </pre>
-                    </label>
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            <div className="flex gap-2">
-              <Button size="sm" onClick={resolveConflicts} disabled={resolving} className="shadow-md shadow-primary/20">
-                {resolving ? 'Resolving…' : 'Resolve & continue'}
-              </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => { setConflicts(null); setConflictChoices({}) }}
-                disabled={resolving}
-                className="border-border/60"
-              >
-                Cancel
-              </Button>
-            </div>
-          </div>
-        )}
-
-        {releaseResult && (
-          <div className="max-w-2xl mx-auto mb-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 space-y-1">
-            <p className="text-xs font-medium text-emerald-600 dark:text-emerald-400">
-              {releaseResult.pr_urls.length > 1 ? 'PRs opened' : 'PR opened'}
-            </p>
-            {releaseResult.pr_urls.map(url => (
-              <a
-                key={url}
-                href={url}
-                target="_blank"
-                rel="noreferrer"
-                className="block text-xs text-primary underline break-all"
-              >
-                {url}
-              </a>
-            ))}
-          </div>
-        )}
-
-        {releaseError && (
-          <p className="max-w-2xl mx-auto mb-2 text-xs text-destructive bg-destructive/10 border border-destructive/20 px-3 py-2 rounded-md">
-            {releaseError}
-          </p>
         )}
 
         <form

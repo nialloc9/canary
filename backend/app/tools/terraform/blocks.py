@@ -65,11 +65,11 @@ class ListTerragruntBlocksTool(BaseTool):
         for stack in stacks:
             svc = GitHubService(
                 token=repo.token, repo_full_name=repo.repo_full_name,
-                branch=stack.branch, api_url=repo.api_url,
+                branch=repo.branch, api_url=repo.api_url,
             )
             path = _repo_path(repo.infrastructure_base_path, stack.name, "landing-zone")
             try:
-                entries = await svc.list_directory(path, ref=stack.branch)
+                entries = await svc.list_directory(path, ref=repo.branch)
             except GitHubError as exc:
                 lines.append(f"{stack.name}: failed to list — {exc}")
                 continue
@@ -154,10 +154,10 @@ class ReadTerragruntBlockTool(BaseTool):
 
         svc = GitHubService(
             token=repo.token, repo_full_name=repo.repo_full_name,
-            branch=stack.branch, api_url=repo.api_url,
+            branch=repo.branch, api_url=repo.api_url,
         )
         path = _repo_path(repo.infrastructure_base_path, stack.name, "landing-zone", block_name, "terragrunt.hcl")
-        content = await svc.get_file_content(path, ref=stack.branch)
+        content = await svc.get_file_content(path, ref=repo.branch)
         if content is None:
             return (
                 f"No block named '{block_name}' found on stack '{stack.name}'. Use list_terragrunt_blocks "
@@ -267,10 +267,10 @@ class EditTerragruntBlockTool(BaseTool):
         for stack in stacks:
             svc = GitHubService(
                 token=repo.token, repo_full_name=repo.repo_full_name,
-                branch=stack.branch, api_url=repo.api_url,
+                branch=repo.branch, api_url=repo.api_url,
             )
             path = _repo_path(repo.infrastructure_base_path, stack.name, "landing-zone", block_name, "terragrunt.hcl")
-            current_by_stack[stack.name] = await svc.get_file_content(path, ref=stack.branch)
+            current_by_stack[stack.name] = await svc.get_file_content(path, ref=repo.branch)
 
         changed = {s: c for s, c in current_by_stack.items() if c != content}
         if not changed:
@@ -300,7 +300,7 @@ class EditTerragruntBlockTool(BaseTool):
                 continue
             svc = GitHubService(
                 token=repo.token, repo_full_name=repo.repo_full_name,
-                branch=stack.branch, api_url=repo.api_url,
+                branch=repo.branch, api_url=repo.api_url,
                 base_path=repo.infrastructure_base_path,
             )
             slug = datetime.now().strftime("%Y%m%d-%H%M%S")

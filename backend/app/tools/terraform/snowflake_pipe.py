@@ -1,3 +1,4 @@
+import re
 import shutil
 import subprocess
 import tempfile
@@ -34,18 +35,25 @@ class SnowflakePipeTool(BaseTool):
             "Snowflake pipe that automatically ingests files dropped into the landing zone S3 bucket "
             "into it. Terraform owns only this raw ingestion shape — Silver/Gold modeling from the "
             "Bronze table onward is dbt's responsibility, not Terraform's. "
-            "The target database/schema are always derived from this landing zone's own {name}-db and "
-            "{name}-db-arch components via Terragrunt dependency blocks — never pass or guess literal "
-            "Snowflake identifiers, since the actual names are transformed by those modules (uppercased, "
-            "and the schema is suffixed with its data classification, e.g. bronze -> BRONZE_CONFIDENTIAL) "
-            "and guessing them wrong fails at apply time with a Snowflake 'object does not exist' error. "
-            "Requires {name}-db and {name}-db-arch to already exist (true for any landing zone created "
-            "via create_landing_zone). "
+            "The target database/schema are always derived via Terragrunt dependency blocks — resolved "
+            "automatically from whichever database this landing zone actually attaches to (its own "
+            "{name}-db/{name}-db-arch normally, or another landing zone's if this one was created with "
+            "existing_database_landing_zone set) — never pass or guess literal Snowflake identifiers, "
+            "since the actual names are transformed by those modules (uppercased, and the schema is "
+            "suffixed with its data classification, e.g. bronze -> BRONZE_CONFIDENTIAL) and guessing "
+            "them wrong fails at apply time with a Snowflake 'object does not exist' error. "
             "If you're creating a brand-new landing zone and it also needs Snowpipe, prefer passing "
             "create_snowpipe=true directly to create_landing_zone instead of calling this afterward. "
-            "By default this applies to every stack configured on the account — always pass "
-            "stack_name when the user's request is specific to one environment (e.g. 'only in dev'), "
-            "otherwise you will silently change every other stack too."
+            "Always ask the user which stack(s) this should apply to before calling — don't assume. "
+            "If they say 'all', 'every environment', or have no preference, proceed without "
+            "stack_name (applies to every stack configured on the account — this is the default "
+            "when they don't care). If they name a specific one (e.g. 'only in dev'), pass "
+            "stack_name for it. Getting this wrong silently changes every other stack too. "
+            "Requires confirmation: call once with confirm omitted (or false) to get a plain-language "
+            "preview of exactly what will be created and which stack(s) it targets — show that to the "
+            "user verbatim and wait for them to explicitly confirm in their next message. Only call "
+            "again with confirm=true, passing the exact same arguments as the preview call, after the "
+            "user has clearly agreed. Never set confirm=true on the first call."
         )
 
     @property
@@ -59,9 +67,18 @@ class SnowflakePipeTool(BaseTool):
                 },
                 "stack_name": {
                     "type": "string",
-                    "description": "Restrict this to a single stack (e.g. 'dev'). Required whenever the "
-                    "request is scoped to one environment. Omit only when the user explicitly wants it "
-                    "added to every stack on the account.",
+                    "description": "Restrict this to a single stack (e.g. 'dev'). Prefer stack_names "
+                    "(plural) when you have it from a UI selection; this remains for a plain-language "
+                    "single-stack request. Omit both when the user explicitly wants it added to every "
+                    "stack on the account.",
+                },
+                "stack_names": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Restrict this to a specific subset of stacks (e.g. ['dev', "
+                    "'staging']) — one or more, but not necessarily all. Takes precedence over "
+                    "stack_name if both are given. Omit (and omit stack_name) when the user wants "
+                    "every stack on the account, which is the default when they have no preference.",
                 },
                 "target_table": {
                     "type": "string",
@@ -79,6 +96,12 @@ class SnowflakePipeTool(BaseTool):
                     "description": "S3 key suffix to filter event notifications, e.g. .json (optional)",
                     "default": "",
                 },
+                "confirm": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Leave false (or omit) to preview what will be created without "
+                    "opening a PR. Only set true after the user has explicitly confirmed the preview.",
+                },
             },
             "required": ["name", "target_table"],
         }
@@ -88,9 +111,10 @@ class SnowflakePipeTool(BaseTool):
         name: str,
         target_table: str,
         stack_name: str | None = None,
+        stack_names: list[str] | None = None,
         filter_prefix: str = "",
         filter_suffix: str = "",
-        _chat_branch: str | None = None,
+        confirm: bool = False,
     ) -> str:
         all_stacks_result = await self._db.execute(
             select(Stack).where(Stack.account_id == self._account_id).order_by(Stack.sort_order)
@@ -99,29 +123,49 @@ class SnowflakePipeTool(BaseTool):
         if not all_stacks:
             return "No stacks configured for this account. Add one under Admin → Stacks first."
 
-        if stack_name:
+        if stack_names:
+            stacks = [s for s in all_stacks if s.name in stack_names]
+            missing = set(stack_names) - {s.name for s in stacks}
+            if missing:
+                return f"No stack(s) named {', '.join(sorted(missing))} found for this account."
+        elif stack_name:
             stacks = [s for s in all_stacks if s.name == stack_name]
             if not stacks:
                 return f"No stack named '{stack_name}' found for this account."
         else:
             stacks = all_stacks
         stack_names = [s.name for s in stacks]
-        # The PR always targets the branch of the stack the user is chatting
-        # from, regardless of which stack(s) the pipe itself is for — see
-        # the equivalent comment in LandingZoneTool.execute.
-        target_branch = _chat_branch
+
+        if not confirm:
+            return (
+                f"This will add Snowpipe auto-ingest to landing zone '{name}' on "
+                f"{', '.join(stack_names)}:\n\n"
+                f"  Bronze table: {target_table} (RAW_DATA VARIANT, SOURCE_FILE, LOAD_TIMESTAMP)\n"
+                f"  Filter:       prefix='{filter_prefix}' suffix='{filter_suffix}'\n\n"
+                "Reply to confirm and I'll open the PR."
+            )
+
+        repo_record = await self._get_github_repo()
 
         with tempfile.TemporaryDirectory() as staging:
             staging_path = Path(staging)
 
             # Sourced from the same versioned modules tree as the rest of the
-            # landing zone; representative version = the first targeted
-            # stack's pinned version (mirrors LandingZoneTool._copy_modules).
-            src = module_source_dir(stacks[0].module_version) / "aws" / "snowflake-pipe"
+            # landing zone — one shared module_version per account (mirrors
+            # LandingZoneTool._copy_modules).
+            module_version = repo_record.module_version if repo_record else "1.0.0"
+            src = module_source_dir(module_version) / "aws" / "snowflake-pipe"
             if src.exists():
                 shutil.copytree(src, staging_path / "modules" / "aws" / "snowflake-pipe")
 
             for env in stack_names:
+                # This landing zone may have been created with
+                # existing_database_landing_zone set, in which case it has no
+                # {name}-db/-db-arch of its own — read its {name}-si to find out
+                # which landing zone's database it actually attaches to, so this
+                # pipe's Bronze table lands in the right place instead of
+                # pointing at a {name}-db that was never created.
+                db_landing_zone = await self._resolve_db_landing_zone(name, repo_record, env)
                 pipe_dir = staging_path / env / "landing-zone" / f"{name}-pipe"
                 pipe_dir.mkdir(parents=True, exist_ok=True)
                 (pipe_dir / "terragrunt.hcl").write_text(
@@ -130,10 +174,11 @@ class SnowflakePipeTool(BaseTool):
                         target_table=target_table,
                         filter_prefix=filter_prefix,
                         filter_suffix=filter_suffix,
+                        db_landing_zone=db_landing_zone,
                     )
                 )
 
-            verify_error = await self._verify_stacks(name, staging_path, stacks, target_branch)
+            verify_error = await self._verify_stacks(name, staging_path, stacks)
             if verify_error:
                 return verify_error
 
@@ -142,12 +187,12 @@ class SnowflakePipeTool(BaseTool):
                 staging_path=staging_path,
                 target_table=target_table,
                 stack_names=stack_names,
-                target_branch=target_branch,
             )
 
         return (
             f"Snowpipe added to '{name}' landing zone\n\n"
-            f"  Database/schema: derived from {name}-db / {name}-db-arch (via dependency blocks)\n"
+            f"  Database/schema: derived via dependency blocks (this landing zone's own database, or "
+            f"a reused one if it was created with existing_database_landing_zone)\n"
             f"  Bronze table:    {target_table} (RAW_DATA VARIANT, SOURCE_FILE, LOAD_TIMESTAMP — created by Terraform)\n"
             f"  Filter:          prefix='{filter_prefix}' suffix='{filter_suffix}'\n"
             f"{github_section}\n"
@@ -155,9 +200,37 @@ class SnowflakePipeTool(BaseTool):
             f"  terragrunt run-all apply --terragrunt-working-dir {stack_names[0]}/landing-zone/{name}-pipe"
         )
 
-    async def _verify_stacks(
-        self, name: str, staging_path: Path, stacks: list[Stack], target_branch: str | None = None
-    ) -> str | None:
+    async def _get_github_repo(self) -> "GitHubRepo | None":
+        result = await self._db.execute(select(GitHubRepo).where(GitHubRepo.account_id == self._account_id))
+        return result.scalar_one_or_none()
+
+    async def _resolve_db_landing_zone(
+        self, name: str, repo_record: "GitHubRepo | None", env: str
+    ) -> str:
+        """Best-effort: read {name}-si's own dependency block to find which
+        landing zone's {*-db}/{*-db-arch} it's actually wired to. Falls back to
+        `name` itself (the common case, and also the safe fallback whenever this
+        can't be determined) rather than raising — a failed lookup here shouldn't
+        block adding a pipe."""
+        if repo_record is None:
+            return name
+        svc = GitHubService(
+            token=repo_record.token,
+            repo_full_name=repo_record.repo_full_name,
+            branch=repo_record.branch,
+            api_url=repo_record.api_url,
+            base_path=repo_record.infrastructure_base_path,
+        )
+        try:
+            content = await svc.get_file_content(f"{env}/landing-zone/{name}-si/terragrunt.hcl")
+        except GitHubError:
+            return name
+        if not content:
+            return name
+        match = re.search(r'dependency\s+"db"\s*\{\s*config_path\s*=\s*"\.\./([\w.-]+)-db"', content)
+        return match.group(1) if match else name
+
+    async def _verify_stacks(self, name: str, staging_path: Path, stacks: list[Stack]) -> str | None:
         """Run terragrunt plan for any stack with verify_before_pr enabled before opening a PR.
 
         Unlike a fresh landing zone, a pipe is added to an *existing* repo tree — the
@@ -175,16 +248,11 @@ class SnowflakePipeTool(BaseTool):
         if not repo:
             return None  # no repo connected yet — _open_pr will report that clearly
 
-        # Verify against the same branch the PR will target — the chat stack's
-        # branch, falling back to the repo's account-level default outside a
-        # chat context (e.g. direct API calls).
-        clone_branch = target_branch or repo.branch
-
         clone_dir = tempfile.mkdtemp(prefix="pipe-verify-")
         try:
             clone_url = f"https://{repo.token}@github.com/{repo.repo_full_name}.git"
             subprocess.run(
-                ["git", "clone", "--depth", "1", "--branch", clone_branch, clone_url, clone_dir],
+                ["git", "clone", "--depth", "1", "--branch", repo.branch, clone_url, clone_dir],
                 check=True,
                 capture_output=True,
             )
@@ -229,7 +297,6 @@ class SnowflakePipeTool(BaseTool):
         staging_path: Path,
         target_table: str,
         stack_names: list[str],
-        target_branch: str | None = None,
     ) -> str:
         result = await self._db.execute(select(GitHubRepo).where(GitHubRepo.account_id == self._account_id))
         record = result.scalar_one_or_none()
@@ -260,11 +327,10 @@ class SnowflakePipeTool(BaseTool):
             f"---\n🤖 Generated by Canary"
         )
 
-        base_branch = target_branch or record.branch
         svc = GitHubService(
             token=record.token,
             repo_full_name=record.repo_full_name,
-            branch=base_branch,
+            branch=record.branch,
             api_url=record.api_url,
             base_path=record.infrastructure_base_path,
         )
@@ -284,12 +350,12 @@ class SnowflakePipeTool(BaseTool):
                 await svc.merge_pull_request(pr_number)
                 return (
                     f"\n  GitHub: merged PR #{pr_number} with {file_count} files\n"
-                    f"  Branch: {feature_branch} → {base_branch}\n"
+                    f"  Branch: {feature_branch} → {record.branch}\n"
                     f"  PR:     {pr_url} (merged)\n"
                 )
             return (
                 f"\n  GitHub: opened PR with {file_count} files\n"
-                f"  Branch: {feature_branch} → {base_branch}\n"
+                f"  Branch: {feature_branch} → {record.branch}\n"
                 f"  PR:     {pr_url}\n"
             )
         except GitHubError as exc:

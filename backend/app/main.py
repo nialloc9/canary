@@ -1,0 +1,43 @@
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.core.config import get_settings
+from app.core.database import db
+from app.api.routes import chat, health, github, auth, stacks, projects, users, org, dbt, data_classifications
+
+settings = get_settings()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Schema is managed by Alembic migrations (run before the process starts —
+    # see the Dockerfile CMD), not by create_all().
+    yield
+    await db.dispose()
+
+
+app = FastAPI(
+    title=settings.app_name,
+    debug=settings.debug,
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(health.router)
+app.include_router(auth.router, prefix=settings.api_prefix)
+app.include_router(chat.router, prefix=settings.api_prefix)
+app.include_router(github.router, prefix=settings.api_prefix)
+app.include_router(stacks.router, prefix=settings.api_prefix)
+app.include_router(projects.router, prefix=settings.api_prefix)
+app.include_router(users.router, prefix=settings.api_prefix)
+app.include_router(org.router, prefix=settings.api_prefix)
+app.include_router(dbt.router, prefix=settings.api_prefix)
+app.include_router(data_classifications.router, prefix=settings.api_prefix)

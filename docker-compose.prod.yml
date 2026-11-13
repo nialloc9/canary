@@ -1,0 +1,21 @@
+version: "3.9"
+
+# Production overrides — run with:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+#
+# Notes:
+#   - No volume mount; code is baked into the image (prod target)
+#   - No local Postgres — point DATABASE_URL at RDS or managed Postgres
+#   - Frontend is deployed to S3, not run as a container
+
+services:
+  backend:
+    build:
+      context: ./backend
+      target: prod
+    env_file: .env.prod
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    # Remove db dependency — use managed database in prod
+    depends_on: {}

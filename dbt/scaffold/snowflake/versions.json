@@ -1,0 +1,7 @@
+[
+  {
+    "version": "1.0.0",
+    "released_at": "2026-07-24",
+    "notes": "Initial scaffold: dbt_project.yml + env-var-driven profiles.yml, empty models/ and macros/, a docker/Dockerfile pinning dbt-snowflake, and a Makefile with predeploy/deploy/postdeploy targets any CI system can call."
+  }
+]

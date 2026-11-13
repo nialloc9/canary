@@ -1,0 +1,13 @@
+version: "3.9"
+
+services:
+  init:
+    build: .
+    env_file: .env
+    networks:
+      - canary
+
+networks:
+  canary:
+    external: true
+    name: canary_default

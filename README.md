@@ -1,70 +1,83 @@
 # Canary
 
-A CLI tool that performs comprehensive, AI-powered data quality analysis on CSV files using Claude. It runs a structured 7-stage pipeline, where each stage builds on the findings of the previous ones, and produces a combined JSON report of results.
-
-## How it works
-
-The tool ingests a CSV file and passes it through 7 sequential analysis stages, each powered by the Claude QA Agent:
-
-| Stage | Name | What it analyses |
-|-------|------|-----------------|
-| 1 | Data Identity | Dataset purpose, arrival frequency, and source/origin |
-| 2 | Schema & Structure | Column types, naming conventions, and schema validity |
-| 3 | Volume & Completeness | Row counts, null rates, and missing data patterns |
-| 4 | Value Rules | Data ranges, formats, and constraint violations |
-| 5 | Uniqueness & Relationships | Duplicate detection and inter-column relationships |
-| 6 | Severity & Business Logic | Business rule violations and severity classification |
-| 7 | Catch-all | Any additional anomalies or concerns not covered above |
-
-Results from each stage are passed as context into the next, allowing later stages to build a progressively richer understanding of the dataset.
-
 ## Prerequisites
 
-- Python 3.11+
-- An Anthropic API key
+- [Docker](https://docs.docker.com/get-docker/) and Docker Compose
 
-## Setup
+## Development
+
+Copy the dev environment file and fill in any missing values:
 
 ```bash
-pip install -r requirements.txt
+cp .env.dev .env.dev.local   # optional — .env.dev has safe defaults for local dev
 ```
 
-Create a `.env` file (or export variables in your shell) with the required environment variables listed below.
+Start the stack (Postgres + backend with hot-reload):
+
+```bash
+docker compose up --build
+```
+
+| Service  | URL                     |
+|----------|-------------------------|
+| Backend  | http://localhost:8000   |
+| Postgres | localhost:5432          |
+
+The backend source is mounted as a volume so code changes reload automatically without rebuilding the image.
+
+To stop and remove containers:
+
+```bash
+docker compose down
+```
+
+To also remove the Postgres volume (wipes all local DB data):
+
+```bash
+docker compose down -v
+```
 
 ## Environment variables
 
-| Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
-| `ANTHROPIC_API_KEY` | **Yes** | — | Your Anthropic API key |
-| `ENV` | No | `development` | Runtime environment (`development` / `production`) |
-| `DEBUG` | No | `True` | Enable debug logging |
-| `ANTHROPIC_API_BASE_URL` | No | `https://api.anthropic.com` | Anthropic API base URL |
-| `ANTHROPIC_CLAUDE_MODEL` | No | `claude-sonnet-4-6` | Claude model ID to use |
-| `ANTHROPIC_CLAUDE_MAX_TOKENS` | No | `4096` | Maximum tokens per response |
-| `ANTHROPIC_CLAUDE_TEMPERATURE` | No | `0.7` | Sampling temperature |
+`.env.dev` is read by Docker Compose at startup. Key variables:
 
-Minimal `.env`:
+| Variable              | Description                          |
+|-----------------------|--------------------------------------|
+| `POSTGRES_USER`       | Postgres username                    |
+| `POSTGRES_PASSWORD`   | Postgres password                    |
+| `POSTGRES_DB`         | Postgres database name               |
+| `DATABASE_URL`        | Full async connection string         |
+| `SECRET_KEY`          | JWT signing secret                   |
+| `ANTHROPIC_API_KEY`   | Anthropic API key                    |
+| `ANTHROPIC_MODEL`     | Claude model ID                      |
+| `CORS_ORIGINS`        | Allowed frontend origins (JSON list) |
 
-```env
-ANTHROPIC_API_KEY=sk-ant-...
-```
+## Production
 
-## Usage
-
-```bash
-python main.py
-```
-
-You will be prompted to enter the path to a CSV file. After analysis completes you can save the results to `analysis_results.json` or analyse another file.
-
-## Docker
+Production uses a second Compose override file. The backend image is built with code baked in (no volume mount), and Postgres is replaced by a managed database. The frontend is deployed to S3 separately.
 
 ```bash
-docker compose up
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 ```
 
-Ensure your environment variables are set in a `.env` file at the project root before running.
+Set production secrets in `.env.prod` before running. At minimum update:
 
-## Output
+- `DATABASE_URL` — point at your managed Postgres (e.g. RDS)
+- `SECRET_KEY` — use a strong random value
+- `ANTHROPIC_API_KEY` — production API key
 
-Results are saved as `analysis_results.json` — a structured JSON object with one key per stage containing the questions asked and Claude's answers.
+## Frontend
+
+The frontend is a Vite + React app under `frontend/`. In development it can be run locally:
+
+```bash
+cd frontend
+npm install
+npm run dev   # http://localhost:5173
+```
+
+In production it is built and deployed to S3 (not run as a container).
+
+## Init script
+
+To seed a test account and connect integrations (GitHub, Snowflake), see [`scripts/init/README.md`](scripts/init/README.md).
